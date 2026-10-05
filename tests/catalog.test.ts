@@ -1,0 +1,8 @@
+import{test}from'node:test';import assert from'node:assert/strict';import{excluded,parseExclusions,paginate,matchesQuery}from'../src/catalog';
+test('exclusion respects folder boundaries and exact file paths',()=>{assert.ok(excluded('模板/嵌套/a.md',['模板']));assert.ok(!excluded('模板更多/a.md',['模板']));assert.ok(excluded('A.md',['A.md']));assert.ok(!excluded('a/A.md',['A.md']));assert.deepEqual(parseExclusions(' /模板/ \n模板\n../bad\n\nA.md'),['模板','A.md']);});
+test('pagination clamps stale pages, bounds DOM rows, and exposes all items',()=>{const items=Array.from({length:453},(_,i)=>i);assert.equal(paginate(items,0).items.length,24);assert.equal(paginate(items,500).page,18);assert.equal(paginate(items,18).items.at(-1),452);assert.deepEqual(paginate([],50),{items:[],page:0,pages:1,total:0});assert.equal(paginate(items,NaN).page,0);});
+test('multi-term searches match content across heading/path with case folding',()=>{assert.ok(matchesQuery(['HashMap','java/collection','树化条件'],'JAVA 树化'));assert.ok(!matchesQuery(['HashMap','java/collection'],'java 缓存'));assert.ok(matchesQuery(['anything'],''));});
+import{noteTags}from'../src/catalog';
+test('documentation YAML singular tag joins native tags without changing the source',()=>{assert.deepEqual(noteTags(['#Java','#学习/算法'],{tag:['数据结构','Java']}),['#Java','#学习/算法','#数据结构']);assert.deepEqual(noteTags([],{tag:'Java, 数据库 Redis'}),['#Java','#数据库 Redis']);assert.deepEqual(noteTags(['#safe'],{tag:[null,42,{unsafe:'object'},'bad\ntag']}),['#safe']);});
+
+test('legacy documentation labels preserve spaces as one learning label',()=>{assert.deepEqual(noteTags([],{tag:['API 网关','分布式 ID']}),['#API 网关','#分布式 ID']);});
