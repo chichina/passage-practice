@@ -253,3 +253,15 @@
 .pp-bulk-confirm {border:1px solid var(--interactive-accent);border-radius:10px;padding:12px;margin:12px 0;background:var(--background-secondary)}
 .pp-bulk-confirm details {max-height:240px;overflow:auto;overflow-wrap:anywhere}
 .pp-selection-count {font-weight:600;font-size:var(--font-ui-small)}
+/* v1.3.1: readable previews remain the default, with visible text-level differences. */
+.pp-diff-legend { flex-wrap:wrap; }
+.pp-rich-content .pp-diff-mark { color:inherit; }
+.pp-rich-content .pp-diff-original { background:#fff0cf; color:#69430c; border-bottom:2px solid #9a681a; }
+.pp-rich-content .pp-diff-recall { background:#e2efff; color:#174a83; border-bottom:2px dotted #326dab; }
+.theme-dark .pp-rich-content .pp-diff-original { background:#4a3718; color:#ffe3a6; border-bottom-color:#c99844; }
+.theme-dark .pp-rich-content .pp-diff-recall { background:#173957; color:#c0e0ff; border-bottom-color:#71ade8; }
+.pp-candidate-question { font-weight:600; }
+.pp-candidate-excerpt { max-height:190px; overflow:auto; }
+.pp-candidate-face { padding:12px; margin:12px 0; border:1px solid var(--background-modifier-border); border-radius:8px; }
+.pp-candidate-face h3 { font-size:12px; color:var(--text-muted); margin:0 0 8px; }
+.pp-candidate-draft { margin:16px 0; }

@@ -99,11 +99,11 @@ test('unchanged candidate saves exactly once with literal reviewed text and sour
 });
 
 test('candidate persistence failure preserves the reviewed draft and permits an explicit retry',async()=>{
- let fail=true;const s=setup(async()=>{if(fail)throw new Error('Simulated disk failure');});try{const p=showCandidate(s);s.button('确认保存为卡片')!.click();await flush();assert.equal(s.store.cards.length,0);assert.equal(s.input('textarea[aria-label="候选答案"]').value,p.excerpt);fail=false;s.button('确认保存为卡片')!.click();await flush();assert.equal(s.store.cards.length,1);assert.equal(s.store.cards[0].back,p.excerpt);
+ let fail=true;const s=setup(async()=>{if(fail)throw new Error('Simulated disk failure');});try{const p=showCandidate(s);s.button('确认保存为卡片')!.click();await flush();assert.equal(s.store.cards.length,0);assert.equal(s.view.draft.back,p.excerpt);assert.equal(s.w.document.querySelectorAll('textarea[aria-label="候选答案"]').length,0);fail=false;s.button('确认保存为卡片')!.click();await flush();assert.equal(s.store.cards.length,1);assert.equal(s.store.cards[0].back,p.excerpt);
  }finally{s.dom.window.close();}
 });
 
 test('candidate markup is sanitized for rendered preview while exact source stays in the draft',async()=>{
- const s=setup();try{const original=note('Safe subject').replace('recorded carefully.','recorded carefully with <img src=x onerror=alert(1)> and <script>alert(1)</script>.');const p=showCandidate(s,original);await flush();const rendered=s.w.document.querySelector('.pp-source-evidence .pp-markdown-content').textContent;assert.ok(rendered.includes('recorded carefully with'));assert.ok(rendered.includes('图片未加载'));assert.equal(s.input('textarea[aria-label="候选答案"]').value,p.excerpt);assert.equal(s.w.__markdownCalls[0].sourcePath,'A.md');assert.ok(!s.w.__markdownCalls[0].markdown.includes('onerror='));assert.equal(s.w.document.querySelectorAll('img,script,iframe,object').length,0);
+ const s=setup();try{const original=note('Safe subject').replace('recorded carefully.','recorded carefully with <img src=x onerror=alert(1)> and <script>alert(1)</script>.');const p=showCandidate(s,original);await flush();const rendered=s.w.document.querySelector('.pp-source-evidence .pp-markdown-content').textContent;assert.ok(rendered.includes('recorded carefully with'));assert.ok(rendered.includes('图片未加载'));assert.equal(s.view.draft.back,p.excerpt);assert.equal(s.w.document.querySelectorAll('textarea[aria-label="候选答案"]').length,0);assert.equal(s.w.__markdownCalls[0].sourcePath,'A.md');assert.ok(!s.w.__markdownCalls[0].markdown.includes('onerror='));assert.equal(s.w.document.querySelectorAll('img,script,iframe,object').length,0);
  }finally{s.dom.window.close();}
 });

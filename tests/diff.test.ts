@@ -66,11 +66,11 @@ test('rendered comparison defaults to rich content and repeated source toggles p
  const render=(parent:HTMLElement,text:string)=>{calls.push(text);const section=parent.ownerDocument.createElement('section');section.className='mock-native-markdown';section.textContent=text;parent.append(section);return()=>{cleaned.push(text);section.remove();};};
  mountComparison(root,original,recall,'完整答案',true,value=>latest=value,render);
  const switcher=root.querySelector<HTMLButtonElement>('.pp-compare-mode')!,toggle=root.querySelector<HTMLInputElement>('.pp-diff-toggle input')!,label=root.querySelector<HTMLElement>('.pp-diff-toggle')!;
- assert.deepEqual(calls,[original,recall]);assert.equal(switcher.textContent,'查看 Markdown 源码差异');assert.equal(label.hidden,true);assert.equal(root.querySelectorAll('pre,mark').length,0);
+ assert.deepEqual(calls,[original,recall]);assert.equal(switcher.textContent,'查看 Markdown 源码差异');assert.equal(label.hidden,false);assert.equal(root.querySelectorAll('pre,mark').length,0);
  for(let cycle=0;cycle<3;cycle++){
   switcher.click();assert.equal(root.querySelectorAll('.mock-native-markdown').length,0);assert.equal(root.querySelectorAll('pre')[0].textContent,original);assert.equal(root.querySelectorAll('pre')[1].textContent,recall);assert.equal(root.querySelectorAll('script,img').length,0);assert.equal(label.hidden,false);
   toggle.checked=cycle%2===0;toggle.dispatchEvent(new dom.window.Event('change'));assert.equal(latest,toggle.checked);assert.equal(root.querySelectorAll('pre')[0].textContent,original);assert.equal(root.querySelectorAll('pre')[1].textContent,recall);assert.equal(root.querySelectorAll('mark').length>0,toggle.checked);
-  switcher.click();assert.equal(root.querySelectorAll('pre,mark').length,0);assert.equal(root.querySelectorAll('.mock-native-markdown').length,2);assert.deepEqual(calls.slice(-2),[original,recall]);assert.equal(label.hidden,true);
+  switcher.click();assert.equal(root.querySelectorAll('pre,mark').length,0);assert.equal(root.querySelectorAll('.mock-native-markdown').length,2);assert.deepEqual(calls.slice(-2),[original,recall]);assert.equal(label.hidden,false);
  }
  assert.equal(cleaned.length,6);dom.window.close();
 });

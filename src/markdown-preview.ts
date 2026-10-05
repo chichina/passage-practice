@@ -14,7 +14,7 @@ export class MarkdownPreviewScope {
  private active=new Set<()=>void>();
  constructor(private app:App){}
  reset(){for(const cancel of [...this.active])cancel();this.active.clear();}
- mount(parent:HTMLElement,markdown:string,sourcePath:string):()=>void {
+ mount(parent:HTMLElement,markdown:string,sourcePath:string,onReady?:(host:HTMLElement)=>void):()=>void {
   const doc=parent.ownerDocument,host=doc.createElement('div');host.className='pp-markdown markdown-rendered';
   host.setAttribute('aria-busy','true');parent.append(host);
   const loading=doc.createElement('p');loading.className='pp-muted';loading.textContent='正在排版…';host.append(loading);
@@ -35,6 +35,7 @@ export class MarkdownPreviewScope {
    for(const input of Array.from(staging.querySelectorAll<HTMLInputElement>('input')))input.disabled=true;
    const links=(event:MouseEvent)=>{const anchor=(event.target as Element)?.closest<HTMLAnchorElement>('a.internal-link');if(!anchor||!host.contains(anchor))return;event.preventDefault();event.stopPropagation();const target=anchor.getAttribute('data-href')||anchor.getAttribute('href');if(target)void this.app.workspace.openLinkText(target,sourcePath,event.ctrlKey||event.metaKey);};
    owner.registerDomEvent(host,'click',links);
+   onReady?.(staging);
   }).catch(()=>{if(!current){owner.unload();staging.replaceChildren();return;}owner.unload();staging.replaceChildren();host.replaceChildren();const error=doc.createElement('p');error.className='pp-error';error.textContent='这段内容暂时无法排版，请打开来源查看，或切换 Markdown 源码差异。';host.append(error);host.setAttribute('aria-busy','false');});
   return cancel;
  }

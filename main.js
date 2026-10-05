@@ -1,4 +1,4 @@
-/* Passage Practice 1.3.0 | Copyright 2026 Passage Practice contributors | MIT License */
+/* Passage Practice 1.3.1 | Copyright 2026 Passage Practice contributors | MIT License */
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -833,7 +833,7 @@ var MarkdownPreviewScope = class {
     for (const cancel of [...this.active]) cancel();
     this.active.clear();
   }
-  mount(parent, markdown, sourcePath) {
+  mount(parent, markdown, sourcePath, onReady) {
     const doc = parent.ownerDocument, host = doc.createElement("div");
     host.className = "pp-markdown markdown-rendered";
     host.setAttribute("aria-busy", "true");
@@ -891,6 +891,7 @@ var MarkdownPreviewScope = class {
         if (target) void this.app.workspace.openLinkText(target, sourcePath, event.ctrlKey || event.metaKey);
       };
       owner.registerDomEvent(host, "click", links);
+      onReady == null ? void 0 : onReady(staging);
     }).catch(() => {
       if (!current) {
         owner.unload();
@@ -1143,6 +1144,84 @@ function compareText(original, recall) {
   return out;
 }
 
+// src/rendered-diff.ts
+function readingParts(root) {
+  const parts = [];
+  const visit = (node) => {
+    var _a2;
+    if (node.nodeType === 3) {
+      parts.push({ node, text: node.textContent || "" });
+      return;
+    }
+    if (node.nodeType !== 1) return;
+    const el = node;
+    if (el.style.display === "none" || el.style.visibility === "hidden") return;
+    if (el.matches('script,style,svg,button,input,[hidden],[aria-hidden="true"],.copy-code-button')) return;
+    if (el.matches(".math,.katex, mjx-container")) {
+      parts.push({ node: el, text: ((_a2 = el.querySelector("annotation")) == null ? void 0 : _a2.textContent) || el.getAttribute("aria-label") || el.textContent || "" });
+      return;
+    }
+    if (el.matches("img")) {
+      parts.push({ node: el, text: el.getAttribute("alt") || "\u3014\u56FE\u7247\u3015" });
+      return;
+    }
+    if (el.matches("br")) {
+      parts.push({ node: null, text: "\n" });
+      return;
+    }
+    for (const child of Array.from(el.childNodes)) visit(child);
+    if (el.matches("p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,tr,td,th")) parts.push({ node: null, text: "\n" });
+  };
+  visit(root);
+  return parts;
+}
+function decorate(parts, spans, side) {
+  var _a2;
+  let start = 0;
+  const ranges = spans.map((span) => {
+    const range = { start, end: start + span.text.length, changed: span.changed };
+    start = range.end;
+    return range;
+  });
+  let offset = 0, index = 0;
+  for (const part of parts) {
+    const end = offset + part.text.length;
+    while (index < ranges.length && ranges[index].end <= offset) index++;
+    const hits = [];
+    for (let j = index; j < ranges.length && ranges[j].start < end; j++) if (ranges[j].changed && ranges[j].end > offset) hits.push(ranges[j]);
+    if (part.node && hits.length) {
+      const title = side === "original" ? "\u9057\u6F0F\u6216\u4E0D\u540C\uFF1A\u539F\u6587\u5185\u5BB9" : "\u65B0\u589E\u6216\u4E0D\u540C\uFF1A\u56DE\u5FC6\u5185\u5BB9";
+      if (part.node.nodeType === 1) {
+        const el = part.node;
+        el.classList.add("pp-diff-mark", "pp-diff-" + side);
+        el.title = title;
+      } else {
+        const doc = part.node.ownerDocument, frag = doc.createDocumentFragment();
+        let at = 0;
+        for (const hit of hits) {
+          const a = Math.max(hit.start - offset, 0), b = Math.min(hit.end - offset, part.text.length);
+          frag.append(doc.createTextNode(part.text.slice(at, a)));
+          const mark = doc.createElement("mark");
+          mark.className = "pp-diff-mark pp-diff-" + side;
+          mark.title = title;
+          mark.textContent = part.text.slice(a, b);
+          frag.append(mark);
+          at = b;
+        }
+        frag.append(doc.createTextNode(part.text.slice(at)));
+        (_a2 = part.node.parentNode) == null ? void 0 : _a2.replaceChild(frag, part.node);
+      }
+    }
+    offset = end;
+  }
+}
+function highlightRenderedComparison(original, recall) {
+  const a = readingParts(original), b = readingParts(recall), diff = compareText(a.map((p) => p.text).join(""), b.map((p) => p.text).join(""));
+  decorate(a, diff.original, "original");
+  decorate(b, diff.recall, "recall");
+  return diff;
+}
+
 // src/comparison.ts
 function mountComparison(parent, original, recall, originalTitle, highlighted = true, onToggle = () => {
 }, renderMarkdown) {
@@ -1156,7 +1235,7 @@ function mountComparison(parent, original, recall, originalTitle, highlighted = 
   const diff = compareText(original, recall);
   const tools = el("div", "pp-compare-tools");
   const legend = el("div", "pp-diff-legend");
-  legend.append(el("span", "pp-diff-key pp-diff-original", "\u539F\u6587\u5DEE\u5F02"), el("span", "pp-diff-key pp-diff-recall", "\u56DE\u7B54\u5DEE\u5F02"));
+  legend.append(el("span", "pp-diff-key pp-diff-original", "\u9057\u6F0F / \u4E0D\u540C\uFF08\u539F\u6587\uFF09"), el("span", "pp-diff-key pp-diff-recall", "\u65B0\u589E / \u4E0D\u540C\uFF08\u56DE\u5FC6\uFF09"));
   const label2 = el("label", "pp-diff-toggle");
   const toggle = el("input", "");
   toggle.type = "checkbox";
@@ -1181,23 +1260,36 @@ function mountComparison(parent, original, recall, originalTitle, highlighted = 
     grid.append(card);
     panes.push({ pre, text: text2, spans, side });
   }
+  let generation = 0;
   const draw = () => {
+    const current = ++generation;
+    let finished = false;
+    const ready = [];
+    const finish = (index, host) => {
+      if (current !== generation || finished) return;
+      ready[index] = host;
+      if (toggle.checked && ready[0] && ready[1]) {
+        finished = true;
+        highlightRenderedComparison(ready[0], ready[1]);
+      }
+    };
     for (const cleanup of cleanups) cleanup();
     cleanups = [];
     switcher.textContent = rich ? "\u67E5\u770B Markdown \u6E90\u7801\u5DEE\u5F02" : "\u8FD4\u56DE\u9605\u8BFB\u683C\u5F0F";
-    label2.hidden = rich;
-    legend.hidden = rich || !toggle.checked;
-    for (const pane of panes) {
+    label2.hidden = false;
+    legend.hidden = !toggle.checked;
+    for (const [index, pane] of panes.entries()) {
       const { text: text2, spans, side } = pane;
       const target = rich ? el("div", "pp-rich-content") : el("pre", "pp-literal-diff");
       pane.pre.replaceWith(target);
       pane.pre = target;
       if (!text2) {
         target.append(el("span", "pp-empty-answer", "\uFF08\u672C\u8F6E\u672A\u586B\u5199\uFF09"));
+        if (rich) finish(index, el("div", ""));
         continue;
       }
       if (rich) {
-        cleanups.push(renderMarkdown(target, text2));
+        cleanups.push(renderMarkdown(target, text2, (host) => finish(index, host)));
         continue;
       }
       if (!toggle.checked) {
@@ -1212,7 +1304,7 @@ function mountComparison(parent, original, recall, originalTitle, highlighted = 
         } else target.append(doc.createTextNode(span.text));
       }
     }
-    legend.hidden = rich || !toggle.checked;
+    legend.hidden = !toggle.checked;
   };
   switcher.addEventListener("click", () => {
     rich = !rich;
@@ -1223,7 +1315,7 @@ function mountComparison(parent, original, recall, originalTitle, highlighted = 
     onToggle(toggle.checked);
   });
   draw();
-  parent.append(el("p", "pp-diff-note", renderMarkdown ? "\u9ED8\u8BA4\u6309 Markdown \u9605\u8BFB\uFF1B\u9700\u8981\u9010\u5B57\u6838\u5BF9\u65F6\uFF0C\u53EF\u5207\u6362\u6E90\u7801\u5DEE\u5F02\u3002\u662F\u5426\u8868\u8FBE\u6B63\u786E\u7531\u4F60\u5224\u65AD" : "\u989C\u8272\u4EC5\u6807\u51FA\u6587\u5B57\u5DEE\u5F02\uFF0C\u662F\u5426\u8868\u8FBE\u6B63\u786E\u7531\u4F60\u5224\u65AD"));
+  parent.append(el("p", "pp-diff-note", renderMarkdown ? "\u9ED8\u8BA4\u5728\u9605\u8BFB\u683C\u5F0F\u4E2D\u6807\u51FA\u6587\u5B57\u5DEE\u5F02\uFF1B\u9EC4\u8272\u662F\u9057\u6F0F\u6216\u4E0D\u540C\uFF0C\u84DD\u8272\u662F\u65B0\u589E\u6216\u4E0D\u540C\u3002\u989C\u8272\u4E0D\u5224\u65AD\u8BED\u4E49\u5BF9\u9519\uFF1B\u516C\u5F0F\u3001\u56FE\u7247\u53CA\u683C\u5F0F\u7EC6\u8282\u8BF7\u7ED3\u5408\u6E90\u7801\u6838\u5BF9" : "\u989C\u8272\u4EC5\u6807\u51FA\u6587\u5B57\u5DEE\u5F02\uFF0C\u662F\u5426\u8868\u8FBE\u6B63\u786E\u7531\u4F60\u5224\u65AD"));
   if (diff.simplified) parent.append(el("p", "pp-diff-note pp-diff-simplified", "\u6587\u672C\u8F83\u957F\uFF0C\u90E8\u5206\u5DEE\u5F02\u5DF2\u5408\u5E76\u6807\u6CE8\uFF1B\u53EF\u53D6\u6D88\u9AD8\u4EAE\u67E5\u770B\u539F\u6837\u6587\u5B57\u3002"));
 }
 
@@ -2349,6 +2441,7 @@ var StudyView = class extends import_obsidian2.ItemView {
     __publicField(this, "bulkReview", null);
     __publicField(this, "selectedCandidates", /* @__PURE__ */ new Map());
     __publicField(this, "batch", []);
+    __publicField(this, "candidateEditing", false);
     __publicField(this, "clozeTerm", "");
     __publicField(this, "candidate", null);
     __publicField(this, "knowledgeQuery", "");
@@ -2873,8 +2966,11 @@ var StudyView = class extends import_obsidian2.ItemView {
       this.render();
     });
     const list = root.createDiv({ cls: "pp-knowledge-list" });
+    let previewCleanups = [];
     const draw = () => {
       var _a2;
+      for (const cleanup of previewCleanups) cleanup();
+      previewCleanups = [];
       list.empty();
       const saved = new Set((((_a2 = this.host.store) == null ? void 0 : _a2.cards) || []).filter((c) => c.sourceRef).map((c) => c.sourcePath + "\n" + c.sourceRef.fingerprint));
       const points = found.points.filter((p) => matchesQuery([p.question, p.excerpt, p.path], this.knowledgeQuery) && (this.knowledgeKind === "all" || this.knowledgeKind === "structured" && p.confidence === "structured" || p.kind === this.knowledgeKind) && (!this.hideSaved || !saved.has(p.path + "\n" + p.fingerprint))).sort((a, b) => ({ definition: 0, list: 1, explanation: 2 })[a.kind] - { definition: 0, list: 1, explanation: 2 }[b.kind]);
@@ -2900,11 +2996,14 @@ var StudyView = class extends import_obsidian2.ItemView {
           review.disabled = !this.selectedCandidates.size;
         });
         item.createEl("span", { text: p.kind === "definition" ? "\u5B9A\u4E49\u5019\u9009 \xB7 \u5F85\u6838\u5BF9" : p.kind === "list" ? "\u8981\u70B9\u5019\u9009 \xB7 \u5F85\u6838\u5BF9" : "\u539F\u6587\u6BB5\u843D \xB7 \u5F85\u5224\u65AD", cls: "pp-candidate-label" });
-        item.createEl("h3", { text: p.question });
-        item.createEl("p", { text: p.excerpt.slice(0, 160) + (p.excerpt.length > 160 ? "\u2026" : ""), cls: "pp-item-preview" });
+        const question = item.createDiv({ cls: "pp-candidate-question" });
+        previewCleanups.push(this.previews.mount(question, p.question, p.path));
+        const answer = item.createDiv({ cls: "pp-item-preview pp-candidate-excerpt" });
+        previewCleanups.push(this.previews.mount(answer, p.excerpt, p.path));
         item.createEl("p", { text: `${p.path} \xB7 \u7B2C ${p.line + 1} \u884C`, cls: "pp-source-path" });
         this.button(item, "\u9884\u89C8\u4E0E\u7F16\u8F91", () => {
           this.candidate = p;
+          this.candidateEditing = false;
           this.clozeTerm = "";
           this.draft = { front: p.question, back: p.excerpt, sourcePath: p.path };
           this.screen = "candidate";
@@ -2965,17 +3064,32 @@ var StudyView = class extends import_obsidian2.ItemView {
     }
     this.button(cloze, "\u751F\u6210\u6316\u7A7A\u8349\u7A3F", () => {
       try {
-        const draft = makeCloze(this.draft.back, this.clozeTerm, p.heading);
-        this.draft = { front: draft.front, back: draft.back, sourcePath: p.path };
-        this.message = `\u5DF2\u751F\u6210 ${draft.matches} \u5904\u6316\u7A7A\uFF0C\u8BF7\u6838\u5BF9\u540E\u4FDD\u5B58`;
+        const draft2 = makeCloze(this.draft.back, this.clozeTerm, p.heading);
+        this.draft = { front: draft2.front, back: draft2.back, sourcePath: p.path };
+        this.message = `\u5DF2\u751F\u6210 ${draft2.matches} \u5904\u6316\u7A7A\uFF0C\u8BF7\u6838\u5BF9\u540E\u4FDD\u5B58`;
         this.render();
       } catch (e) {
         this.message = e.message;
         this.render();
       }
     });
-    this.field(root, "\u5019\u9009\u95EE\u9898", this.draft.front, (v) => this.draft.front = v, "\u6539\u6210\u80FD\u72EC\u7ACB\u7406\u89E3\u7684\u95EE\u9898", 4e3);
-    this.field(root, "\u5019\u9009\u7B54\u6848", this.draft.back, (v) => this.draft.back = v, "\u4FDD\u7559\u5FC5\u8981\u4E0A\u4E0B\u6587");
+    const draft = root.createDiv({ cls: "pp-candidate-draft" });
+    const modes = draft.createDiv({ cls: "pp-actions" });
+    this.button(modes, this.candidateEditing ? "\u5207\u6362\u5230 Markdown \u9884\u89C8" : "\u7F16\u8F91 Markdown \u6E90\u7801", () => {
+      this.candidateEditing = !this.candidateEditing;
+      this.render();
+    });
+    draft.createEl("p", { text: this.candidateEditing ? "\u7F16\u8F91\u6A21\u5F0F \xB7 \u8F93\u5165 Markdown \u6E90\u7801\uFF0C\u5207\u6362\u9884\u89C8\u6838\u5BF9\u6392\u7248" : "\u9884\u89C8\u6A21\u5F0F \xB7 \u4FDD\u5B58\u5185\u5BB9\u4E0E\u4E0B\u65B9\u9884\u89C8\u4E00\u81F4", cls: "pp-footnote" });
+    if (this.candidateEditing) {
+      this.field(draft, "\u5019\u9009\u95EE\u9898", this.draft.front, (v) => this.draft.front = v, "\u6539\u6210\u80FD\u72EC\u7ACB\u7406\u89E3\u7684\u95EE\u9898", 4e3);
+      this.field(draft, "\u5019\u9009\u7B54\u6848", this.draft.back, (v) => this.draft.back = v, "\u4FDD\u7559\u5FC5\u8981\u4E0A\u4E0B\u6587");
+    } else {
+      for (const [label2, value] of [["\u5019\u9009\u95EE\u9898", this.draft.front], ["\u5019\u9009\u7B54\u6848", this.draft.back]]) {
+        const face = draft.createDiv({ cls: "pp-candidate-face" });
+        face.createEl("h3", { text: label2 });
+        this.previews.mount(face, value, p.path);
+      }
+    }
     root.createEl("p", { text: "\u786E\u8BA4\u540E\u65B0\u589E\u4E00\u5F20\u672C\u5730\u5FEB\u7167\u5361\u7247\u3002\u5F53\u524D\u5019\u9009\u4E0D\u4FEE\u6539\u539F\u7B14\u8BB0\uFF1B\u7F16\u8F91\u540E\u7684\u7B54\u6848\u7531\u4F60\u8D1F\u8D23\u6838\u5BF9\u3002", cls: "pp-footnote" });
     this.button(root, "\u786E\u8BA4\u4FDD\u5B58\u4E3A\u5361\u7247", () => {
       const d = { ...this.draft };
@@ -3074,7 +3188,8 @@ var StudyView = class extends import_obsidian2.ItemView {
     for (const p of this.batch) {
       const box = root.createEl("details", { cls: "pp-batch-item" });
       if (this.batch.filter((x) => x.question === p.question).length > 1) box.createEl("p", { text: "\u672C\u6279\u6709\u76F8\u540C\u9898\u76EE\uFF0C\u539F\u6587\u53EF\u80FD\u5305\u542B\u4E0D\u540C\u6761\u4EF6\uFF1B\u8BF7\u5206\u522B\u6838\u5BF9\u6216\u5355\u6761\u6539\u5199\u3002", cls: "pp-caveat" });
-      box.createEl("summary", { text: p.question });
+      const summary = box.createEl("summary");
+      this.previews.mount(summary, p.question, p.path);
       box.createEl("p", { text: p.path + " \xB7 \u7B2C " + (p.line + 1) + " \u884C", cls: "pp-source-path" });
       this.previews.mount(box, p.excerpt, p.path);
       this.button(box, "\u4ECE\u672C\u6279\u79FB\u9664", () => {
@@ -3249,7 +3364,7 @@ var StudyView = class extends import_obsidian2.ItemView {
       root.createEl("p", { text: "\u60F3\u4E0D\u8D77\u6765\u4E5F\u53EF\u4EE5\u63ED\u6653\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5224\u9519\u3002", cls: "pp-footnote" });
     } else {
       root.createEl("p", { text: s.question, cls: "pp-question" });
-      mountComparison(root.createDiv(), s.target, s.recall, s.rounds.length ? "\u672C\u8F6E\u6F0F\u70B9\u7B54\u6848" : p.kind && p.kind !== "selection" ? "\u672C\u8282\u5B8C\u6574\u7B54\u6848" : "\u539F\u59CB\u9009\u6BB5", this.compare, (value) => this.compare = value, (parent, text2) => this.previews.mount(parent, text2, p.path));
+      mountComparison(root.createDiv(), s.target, s.recall, s.rounds.length ? "\u672C\u8F6E\u6F0F\u70B9\u7B54\u6848" : p.kind && p.kind !== "selection" ? "\u672C\u8282\u5B8C\u6574\u7B54\u6848" : "\u539F\u59CB\u9009\u6BB5", this.compare, (value) => this.compare = value, (parent, text2, onReady) => this.previews.mount(parent, text2, p.path, onReady));
       let retry;
       this.field(root, "\u6211\u6F0F\u6389\u7684\u8981\u70B9\uFF08\u6BCF\u884C\u4E00\u6761\uFF09", s.missed, (v) => {
         s.missed = v;
@@ -4180,9 +4295,9 @@ var PracticeModal = class extends import_obsidian4.Modal {
         s.rounds.length ? "\u672C\u8F6E\u6F0F\u70B9\u7B54\u6848" : "\u539F\u59CB\u9009\u6BB5",
         this.compareHighlights,
         (value) => this.compareHighlights = value,
-        (parent, text2) => {
+        (parent, text2, onReady) => {
           var _a2;
-          return this.previews.mount(parent, text2, ((_a2 = this.sourceFile) == null ? void 0 : _a2.path) || this.sourcePath);
+          return this.previews.mount(parent, text2, ((_a2 = this.sourceFile) == null ? void 0 : _a2.path) || this.sourcePath, onReady);
         }
       );
       const m = this.textArea(body, "\u6211\u6F0F\u6389\u7684\u8981\u70B9\uFF08\u6BCF\u884C\u4E00\u6761\uFF09", s.missed, (v) => {

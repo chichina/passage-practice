@@ -18,7 +18,7 @@ test('modal only mounts rendered comparison after reveal; retry removes answers 
  assert.equal(root.querySelectorAll('pre,mark,.pp-compare').length,0);assert.ok(!root.body.textContent!.includes('原文绝密'));
  button('跳过，使用标题').click();assert.equal(root.querySelectorAll('pre,mark,.pp-compare').length,0);assert.ok(!root.body.textContent!.includes('原文绝密'));
  const recall=root.querySelector('textarea')!;recall.value='回答绝密👩🏽‍💻';recall.dispatchEvent(new w.Event('input'));button('揭晓并对照').click();await flush();
- assert.equal(root.querySelectorAll('.pp-markdown-content').length,2);assert.equal(root.querySelectorAll('.pp-markdown-content')[0].textContent,'原文绝密👩🏽‍💻');assert.equal(root.querySelectorAll('.pp-markdown-content')[1].textContent,'回答绝密👩🏽‍💻');assert.equal(root.querySelectorAll('pre,mark').length,0);
+ assert.equal(root.querySelectorAll('.pp-markdown-content').length,2);assert.equal(root.querySelectorAll('.pp-markdown-content')[0].textContent,'原文绝密👩🏽‍💻');assert.equal(root.querySelectorAll('.pp-markdown-content')[1].textContent,'回答绝密👩🏽‍💻');assert.equal(root.querySelectorAll('pre').length,0);assert.ok(root.querySelectorAll('mark').length>0);
  button('查看 Markdown 源码差异').click();assert.equal(root.querySelectorAll('pre').length,2);assert.equal(root.querySelectorAll('pre')[0].textContent,'原文绝密👩🏽‍💻');assert.equal(root.querySelectorAll('pre')[1].textContent,'回答绝密👩🏽‍💻');assert.ok(root.querySelectorAll('mark').length);
  const missed=root.querySelector('textarea')!;missed.value='漏点绝密';missed.dispatchEvent(new w.Event('input'));
  const toggle=root.querySelector<HTMLInputElement>('.pp-diff-toggle input')!;toggle.checked=false;toggle.dispatchEvent(new w.Event('change'));assert.equal(missed.value,'漏点绝密');

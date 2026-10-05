@@ -49,7 +49,7 @@ export class PracticeModal extends Modal {
   } else {
    body.createEl('p',{text:s.question,cls:'pp-question'});
    mountComparison(body.createDiv({cls:'pp-comparison'}),s.target,s.recall,s.rounds.length?'本轮漏点答案':'原始选段',
-    this.compareHighlights,value=>this.compareHighlights=value,(parent,text)=>this.previews.mount(parent,text,this.sourceFile?.path||this.sourcePath));
+    this.compareHighlights,value=>this.compareHighlights=value,(parent,text,onReady)=>this.previews.mount(parent,text,this.sourceFile?.path||this.sourcePath,onReady));
    const m=this.textArea(body,'我漏掉的要点（每行一条）',s.missed,v=>{s.missed=v;retry.disabled=!s.points().length;},'可以复制上方原文中的要点，也可以自己概括。'); m.classList.add('pp-missed');
    const row=body.createDiv({cls:'pp-actions'});
    const retry=this.button(row,'只练这些漏点',()=>{if(s.retry())this.render();},true);retry.disabled=!s.points().length;
