@@ -1,11 +1,26 @@
 import {KnowledgePoint,extractKnowledge,fingerprint} from './knowledge';
-import {Card, createCard} from './cards';
+import {Card, SourceRef, SourcePassageKind, createCard} from './cards';
 import {markdownStructure} from './sections';
 import {OutlineBranch,parseOutline} from './outline';
 export type Scope = {kind:'all'|'current'|'folder'|'tag';value:string};
-export interface Passage {text:string;question:string;line:number;path:string;endLine?:number;headingLine?:number;headingPath?:string[];kind?:'section'|'intro'|'preamble'|'document'|'selection'}
+export interface Passage {text:string;question:string;line:number;path:string;endLine?:number;headingLine?:number;headingPath?:string[];kind?:SourcePassageKind|'selection';sourceRef?:SourceRef}
 export interface AuthoredCard {id:string;front:string;back:string;sourcePath:string;line:number}
 export interface NoteIndex {sourceFingerprint?:string;path:string;name:string;tags:string[];passages:Passage[];cards:AuthoredCard[];warnings:string[];knowledge:KnowledgePoint[];outline:OutlineBranch[]}
+/** Capture before a selection's answer is edited or wrapped in cloze syntax. */
+export function selectionSourceRef(source:string,selectedText:string,path:string,line:number):SourceRef {
+ const text=source.replace(/\r\n/g,'\n'),excerpt=selectedText.replace(/\r\n/g,'\n'),structure=markdownStructure(text);
+ if(!excerpt.trim()||!Number.isInteger(line)||line<0||line>=structure.rows.length)throw new Error('选段来源位置无效，请重新选择原文后制卡。');
+ const offset=structure.rows.slice(0,line).reduce((sum,row)=>sum+row.length+1,0),at=text.indexOf(excerpt,offset);
+ if(at<offset||at>offset+structure.rows[line].length)throw new Error('选段与来源内容不一致，请重新选择原文后制卡。');
+ const headingPath=structure.headings.filter(heading=>heading.line<=line).at(-1)?.path||[];
+ return {kind:'selection',line,endLine:line+excerpt.split('\n').length-1,heading:headingPath.join(' › ')||path.split('/').pop()!.replace(/\.md$/i,''),headingPath:[...headingPath],excerpt,fingerprint:fingerprint(excerpt)};
+}
+/** Always capture the original passage, including when only missed points become the card answer. */
+export function passageSourceRef(passage:Passage):SourceRef {
+ if(passage.sourceRef)return {...passage.sourceRef,...(passage.sourceRef.headingPath?{headingPath:[...passage.sourceRef.headingPath]}:{})};
+ const excerpt=passage.text.replace(/\r\n/g,'\n'),selection=passage.kind==='selection'||!passage.kind;
+ return {kind:selection?'selection':'passage',line:passage.line,endLine:selection?passage.line+excerpt.split('\n').length-1:Math.max(passage.line,(passage.endLine??passage.line+excerpt.split('\n').length)-1),heading:passage.headingPath?.join(' › ')||passage.question,excerpt,fingerprint:fingerprint(excerpt),...(selection?passage.headingPath?{headingPath:[...passage.headingPath]}:{}:{question:passage.question,passageKind:passage.kind as SourcePassageKind,headingPath:[...(passage.headingPath||[])]})};
+}
 export function matchesScope(path:string,tags:readonly string[],scope:Scope,current:string):boolean {
  if(scope.kind==='all')return true;
  if(scope.kind==='current')return !!current&&path===current;
@@ -63,9 +78,9 @@ export function parseNote(text:string,path:string,tags:string[]=[]):NoteIndex {
 export function studyCards(notes:readonly NoteIndex[],saved:readonly Card[],scope:Scope,current:string,now:number):{cards:Card[];warnings:string[]} {
  const found=new Map<string,AuthoredCard[]>();for(const n of notes)for(const c of n.cards)found.set(c.id,[...(found.get(c.id)||[]),c]);
  const warnings:string[]=[],cards:Card[]=[],byPath=new Map(notes.map(n=>[n.path,n]));
- for(const [id,occurrences]of found){if(occurrences.length!==1){warnings.push(`卡片 ID 重复，已跳过：${occurrences.map(c=>c.sourcePath+':'+(c.line+1)).join('、')}。请用「插入卡片标记」创建新卡，勿复制 id。`);continue;}
+ for(const [id,occurrences]of found){if(occurrences.length!==1){warnings.push(`卡片 ID 重复，已跳过：${occurrences.map(c=>c.sourcePath+':'+(c.line+1)).join('、')}。请检查原有标记编号；新卡片请使用独立「新建卡片」。`);continue;}
   const c=occurrences[0],n=byPath.get(c.sourcePath)!;if(!matchesScope(c.sourcePath,n.tags,scope,current))continue;const previous=saved.find(x=>x.id===id);cards.push(previous?{...previous,front:c.front,back:c.back,sourcePath:c.sourcePath}:createCard(c.front,c.back,c.sourcePath,now,id));}
- for(const c of saved){if(c.id.startsWith('note:'))continue;const n=byPath.get(c.sourcePath);if(matchesScope(c.sourcePath,n?.tags||[],scope,current))cards.push({...c});}
+ for(const c of saved){if(c.id.startsWith('note:')&&found.has(c.id))continue;if(c.id.startsWith('note:'))warnings.push('来源标记缺失，保留最后快照与进度：'+c.sourcePath);const n=byPath.get(c.sourcePath);if(matchesScope(c.sourcePath,n?.tags||[],scope,current))cards.push({...c});}
  return{cards,warnings};
 }
 /** Append only at a Markdown top-level EOF. Never alter existing source text. */

@@ -1,10 +1,18 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {AGAIN_MS, DAY_MS, MAX_INTERVAL_DAYS, CardValidationError, applyRating, createCard, dueCards, normalizeData} from '../src/cards';
+import {AGAIN_MS, DAY_MS, MAX_INTERVAL_DAYS, FSRS_PARAMETERS, FSRS_IMPLEMENTATION_VERSION, CardValidationError, applyRating, createCard, dueCards, normalizeData, resetScheduling} from '../src/cards';
+import {createEmptyCard, fsrs, State} from 'ts-fsrs';
+import type {Card as OfficialCard, ReviewLog, Grade} from 'ts-fsrs';
+import {execFileSync} from 'node:child_process';
 import type {Card, Rating} from '../src/cards';
 
 const NOW = Date.parse('2026-10-02T23:57:42.123Z');
-const makeCard = (overrides: Partial<Card> = {}): Card => ({...createCard('问题', '答案', '笔记/来源.md', NOW, 'card-1'), ...overrides});
+const fresh = (): Card => createCard('问题', '答案', '笔记/来源.md', NOW, 'card-1');
+// Old summary-only cards are deliberate migration fixtures.
+const makeCard = (overrides: Partial<Card> = {}): Card => {const {fsrs: _schedule, ...legacy} = fresh(); return {...legacy, ...overrides};};
+const serializedCard = (card: OfficialCard) => {const {due, last_review, ...rest} = card; return {...rest, due: due.getTime(), ...(last_review ? {last_review: last_review.getTime()} : {})};};
+const serializedLog = (log: ReviewLog) => ({...log, due: log.due.getTime(), review: log.review.getTime()});
+function freezeDeep<T>(value: T): T {if (value && typeof value === 'object') {for (const item of Object.values(value)) freezeDeep(item); Object.freeze(value);} return value;}
 const data = (cards: unknown[]) => ({version: 2, cards});
 const invalid = (raw: unknown) => assert.throws(() => normalizeData(raw, NOW), CardValidationError);
 
@@ -32,7 +40,7 @@ test('v2 persistence round-trips every field without mutating or aliasing inputs
 });
 
 test('unsupported versions never silently downgrade or discard saved data', () => {
- for (const version of [0, 1, 3, 999, '2', null, undefined]) {
+ for (const version of [0, 1, 4, 999, '2', null, undefined]) {
   const raw = {version, cards: [makeCard()]};
   const before = JSON.stringify(raw);
   assert.throws(() => normalizeData(raw, NOW), /Unsupported flashcard data version/);
@@ -111,14 +119,21 @@ test('saved timestamps, counters and interval bounds reject NaN, coercions and o
  for (const key of ['reviews', 'lapses', 'revision', 'intervalDays']) {
   for (const value of [-1, NaN, Infinity, '0', 0.5, Number.MAX_SAFE_INTEGER + 1]) invalid(data([{...makeCard(), [key]: value}]));
  }
- invalid(data([makeCard({intervalDays: 366})]));
+ invalid(data([makeCard({intervalDays: MAX_INTERVAL_DAYS + 1})]));
  assert.equal(normalizeData(data([makeCard({dueAt: 0, lastReviewedAt: null, intervalDays: 365})]), NOW).cards[0].dueAt, 0);
 });
 
 test('new card preserves exact snapshots and starts due now with zero scheduling history', () => {
  const card = createCard('  问题\n', '\n答案 👩🏽‍💻\n', '笔记/来源.md', NOW, 'card-1');
- assert.deepEqual(card, {id: 'card-1', front: '  问题\n', back: '\n答案 👩🏽‍💻\n', sourcePath: '笔记/来源.md',
+ const {fsrs: schedule, ...summary} = card;
+ assert.deepEqual(summary, {id: 'card-1', front: '  问题\n', back: '\n答案 👩🏽‍💻\n', sourcePath: '笔记/来源.md',
   createdAt: NOW, updatedAt: NOW, dueAt: NOW, intervalDays: 0, reviews: 0, lapses: 0, suspended: false, lastReviewedAt: null, revision: 0});
+ assert.deepEqual(schedule!.card, serializedCard(createEmptyCard(new Date(NOW))));
+ assert.deepEqual(schedule!.logs, []);
+ assert.deepEqual(schedule!.baseline, {kind: 'new', at: NOW, reviews: 0, lapses: 0, logIndex: 0});
+ assert.equal(schedule!.algorithm, 'FSRS-6');
+ assert.equal(schedule!.implementationVersion, FSRS_IMPLEMENTATION_VERSION);
+ assert.deepEqual(schedule!.parameters, FSRS_PARAMETERS);
  assert.equal(createCard('question', 'answer', '', 0, 'zero').dueAt, 0);
 });
 
@@ -135,89 +150,267 @@ test('new card validates inclusive front/back limits without truncation', () => 
  assert.throws(() => createCard('🪴'.repeat(2001), 'a', '', NOW, 'unicode'), CardValidationError);
 });
 
-test('first ratings use exact 10-minute, 1-day, 3-day and 5-day elapsed intervals', () => {
- const cases: Array<[Rating, number, number]> = [['again', AGAIN_MS, 0], ['hard', DAY_MS, 1], ['good', 3 * DAY_MS, 3], ['easy', 5 * DAY_MS, 5]];
- for (const [rating, delay, interval] of cases) {
-  const original = Object.freeze(makeCard());
+test('fresh ratings use the pinned official FSRS learning steps and complete logs', () => {
+ const cases: Array<[Rating, Grade, number, number]> = [['again', 1, 60_000, 0], ['hard', 2, 6 * 60_000, 0], ['good', 3, 10 * 60_000, 0], ['easy', 4, 8 * DAY_MS, 8]];
+ for (const [rating, grade, delay, interval] of cases) {
+  const original = freezeDeep(fresh());
+  const expected = fsrs({enable_fuzz: false}).next(createEmptyCard(new Date(NOW)), new Date(NOW), grade);
   const card = applyRating(original, rating, NOW);
   assert.equal(card.dueAt, NOW + delay);
   assert.equal(card.intervalDays, interval);
   assert.equal(card.reviews, 1);
-  assert.equal(card.lapses, rating === 'again' ? 1 : 0);
+  assert.equal(card.lapses, 0);
   assert.equal(card.revision, 1);
   assert.equal(card.lastReviewedAt, NOW);
   assert.equal(card.updatedAt, NOW);
   assert.equal(card.createdAt, original.createdAt);
+  assert.deepEqual(card.fsrs!.card, serializedCard(expected.card));
+  assert.deepEqual(card.fsrs!.logs, [serializedLog(expected.log)]);
+  assert.deepEqual(applyRating(original, rating, NOW), card, 'repeated previews must be identical');
   assert.equal(original.reviews, 0);
+  assert.equal(original.fsrs!.logs.length, 0);
  }
 });
 
-test('existing intervals grow with upward rounding and rating-specific minimums', () => {
- const cases: Array<[number, Rating, number]> = [
-  [10, 'hard', 12], [3, 'hard', 4], [1, 'hard', 2], [10, 'good', 20], [10, 'easy', 30],
-  [1, 'good', 3], [1, 'easy', 5], [0, 'hard', 1], [0, 'good', 3], [0, 'easy', 5],
- ];
- for (const [previous, rating, expected] of cases) {
-  const card = applyRating(makeCard({intervalDays: previous, reviews: 2, revision: 9, lapses: 1, lastReviewedAt: NOW - DAY_MS}), rating, NOW);
-  assert.equal(card.intervalDays, expected);
-  assert.equal(card.dueAt, NOW + expected * DAY_MS);
-  assert.equal(card.reviews, 3);
-  assert.equal(card.lapses, 1);
-  assert.equal(card.revision, 10);
+test('legacy import preserves exact schedule and counters without fabricating FSRS state or history', () => {
+ const original = makeCard({intervalDays: 100, reviews: 23, lapses: 4, revision: 31, dueAt: NOW - 4 * DAY_MS, lastReviewedAt: NOW - 104 * DAY_MS});
+ const before = JSON.stringify(original);
+ const loaded = normalizeData(data([original]), NOW).cards[0];
+ assert.deepEqual(loaded, original);
+ assert.equal(Object.hasOwn(loaded, 'fsrs'), false);
+ const next = applyRating(loaded, 'good', NOW);
+ assert.equal(next.dueAt, NOW + 10 * 60_000);
+ assert.equal(next.reviews, 24);
+ assert.equal(next.lapses, 4);
+ assert.equal(next.revision, 32);
+ assert.equal(next.fsrs!.card.reps, 1);
+ assert.equal(next.fsrs!.card.lapses, 0);
+ assert.deepEqual(next.fsrs!.baseline, {kind: 'legacy', at: NOW, reviews: 23, lapses: 4, logIndex: 0});
+ assert.equal(next.fsrs!.logs.length, 1);
+ assert.equal(next.fsrs!.logs[0].state, State.New);
+ assert.equal(JSON.stringify(original), before);
+});
+
+test('a new card first reviewed much later keeps a zero-elapsed initial FSRS log', () => {
+ const reviewedAt = NOW + 21 * DAY_MS;
+ const result = applyRating(fresh(), 'good', reviewedAt);
+ assert.equal(result.dueAt, reviewedAt + 10 * 60_000);
+ assert.equal(result.fsrs!.logs[0].due, NOW);
+ assert.equal(result.fsrs!.logs[0].elapsed_days, 0);
+ assert.deepEqual(normalizeData(data([result]), reviewedAt).cards[0], result);
+});
+
+test('FSRS progression and overdue reviews exactly match the official implementation after every reload', () => {
+ const scheduler = fsrs({enable_fuzz: false});
+ let card = fresh(), reference = createEmptyCard(new Date(NOW));
+ const ratings: Array<[Rating, Grade, number]> = [['good', 3, 0], ['good', 3, 0], ['hard', 2, 3 * DAY_MS], ['good', 3, 30 * DAY_MS], ['again', 1, DAY_MS], ['again', 1, 0], ['good', 3, 0], ['easy', 4, 60 * DAY_MS]];
+ for (const [rating, grade, overdue] of ratings) {
+  const reviewedAt = card.dueAt + overdue;
+  const expected = scheduler.next(reference, new Date(reviewedAt), grade);
+  card = applyRating(card, rating, reviewedAt);
+  assert.deepEqual(card.fsrs!.card, serializedCard(expected.card));
+  assert.deepEqual(card.fsrs!.logs.at(-1), serializedLog(expected.log));
+  assert.equal(card.dueAt, expected.card.due.getTime());
+  assert.equal(card.lapses, expected.card.lapses);
+  const restored = normalizeData(JSON.parse(JSON.stringify(data([card]))), reviewedAt).cards[0];
+  assert.deepEqual(restored, card);
+  card = restored;
+  reference = expected.card;
  }
+ assert.equal(card.fsrs!.logs.length, ratings.length);
+ assert.ok(card.fsrs!.logs.some(log => log.elapsed_days >= 30));
 });
 
-test('all positive intervals cap at 365 days without capping review counts', () => {
- for (const rating of ['hard', 'good', 'easy'] as const) {
-  const card = applyRating(makeCard({intervalDays: 365, reviews: 400}), rating, NOW);
-  assert.equal(card.intervalDays, MAX_INTERVAL_DAYS);
-  assert.equal(card.dueAt, NOW + 365 * DAY_MS);
-  assert.equal(card.reviews, 401);
- }
- assert.equal(applyRating(makeCard({intervalDays: 304}), 'hard', NOW).intervalDays, 365);
+test('same-day and exact-same-time reviews are supported and use FSRS short-term state', () => {
+ let card = applyRating(fresh(), 'good', NOW);
+ const firstStability = card.fsrs!.card.stability;
+ card = applyRating(card, 'good', NOW);
+ assert.equal(card.fsrs!.card.elapsed_days, 0);
+ assert.equal(card.fsrs!.card.state, State.Review);
+ assert.ok(card.fsrs!.card.stability >= firstStability);
+ card = applyRating(card, 'again', NOW + 30_000);
+ assert.equal(card.fsrs!.card.elapsed_days, 0);
+ assert.equal(card.fsrs!.card.state, State.Relearning);
+ assert.equal(card.lapses, 1);
+ assert.equal(card.fsrs!.logs.length, 3);
 });
 
-test('Again resets the interval and repeated lapses restart successful minimums', () => {
- const original = makeCard({intervalDays: 100, reviews: 20, lapses: 2, revision: 30, lastReviewedAt: NOW - 100 * DAY_MS});
- const first = applyRating(original, 'again', NOW);
- const second = applyRating(first, 'again', NOW + AGAIN_MS);
- assert.equal(second.intervalDays, 0);
- assert.equal(second.dueAt, NOW + 2 * AGAIN_MS);
- assert.equal(second.reviews, 22);
- assert.equal(second.lapses, 4);
- assert.equal(second.revision, 32);
- assert.equal(applyRating(second, 'good', NOW + 2 * AGAIN_MS).intervalDays, 3);
- assert.equal(original.intervalDays, 100);
+test('crossing UTC midnight uses official UTC-day elapsed time even within ten minutes', () => {
+ const first = applyRating(fresh(), 'good', NOW);
+ const second = applyRating(first, 'good', first.dueAt);
+ assert.equal(first.dueAt - NOW, 10 * 60_000);
+ assert.equal(second.fsrs!.card.elapsed_days, 1);
+ assert.equal(second.fsrs!.logs[1].elapsed_days, 1);
+ assert.deepEqual(normalizeData(data([second]), second.lastReviewedAt!).cards[0], second);
 });
 
-test('review timing is measured from actual review, including overdue cards and DST dates', () => {
- const reviewTimes = [NOW, Date.parse('2026-03-08T01:30:00-05:00'), Date.parse('2026-11-01T01:30:00-04:00')];
- for (const reviewAt of reviewTimes) {
-  const card = applyRating(makeCard({dueAt: reviewAt - 7 * DAY_MS}), 'good', reviewAt);
-  assert.equal(card.dueAt - reviewAt, 72 * 60 * 60 * 1000);
-  assert.equal(new Date(card.dueAt).getUTCMilliseconds(), new Date(reviewAt).getUTCMilliseconds());
- }
+test('Again counts a lapse in Review, not during initial learning or repeated relearning', () => {
+ let card = applyRating(fresh(), 'again', NOW);
+ card = applyRating(card, 'again', card.dueAt);
+ assert.equal(card.lapses, 0);
+ card = applyRating(card, 'good', card.dueAt);
+ card = applyRating(card, 'good', card.dueAt);
+ assert.equal(card.fsrs!.card.state, State.Review);
+ card = applyRating(card, 'again', card.dueAt);
+ assert.equal(card.fsrs!.card.state, State.Relearning);
+ assert.equal(card.lapses, 1);
+ const lapseDue = card.dueAt;
+ card = applyRating(card, 'again', lapseDue);
+ assert.equal(card.lapses, 1);
+ assert.equal(card.dueAt, lapseDue + 10 * 60_000);
+ assert.equal(card.reviews, 6);
 });
 
-test('rating preserves source, text and suspension and accepts a safe clock rollback', () => {
- const original = makeCard({front: ' literal front ', back: '\nliteral back\n', suspended: true});
- const card = applyRating(original, 'hard', NOW - 1000);
+test('mature intervals retain official cap-ordering outputs instead of applying custom bounds', () => {
+ let card = fresh();
+ for (let index = 0; index < 40 && card.intervalDays < MAX_INTERVAL_DAYS; index++) card = applyRating(card, 'easy', card.dueAt);
+ assert.equal(FSRS_PARAMETERS.maximum_interval, 36500);
+ assert.equal(MAX_INTERVAL_DAYS, 36502);
+ assert.equal(card.intervalDays, MAX_INTERVAL_DAYS);
+ assert.equal(card.dueAt - card.lastReviewedAt!, MAX_INTERVAL_DAYS * DAY_MS);
+ assert.ok(card.reviews > 1);
+ assert.ok(card.fsrs!.card.stability > 365);
+});
+
+test('relearn preserves all actual history and cumulative counts while resetting memory', () => {
+ let card = applyRating(makeCard({reviews: 20, lapses: 3}), 'easy', NOW);
+ card = applyRating(card, 'again', card.dueAt);
+ const snapshot = structuredClone(card);
+ const resetAt = card.dueAt + 1000;
+ const reset = resetScheduling(freezeDeep(card), resetAt);
+ assert.equal(reset.fsrs!.card.state, State.New);
+ assert.equal(reset.fsrs!.card.reps, 0);
+ assert.equal(reset.fsrs!.card.stability, 0);
+ assert.equal(reset.fsrs!.card.difficulty, 0);
+ assert.equal(reset.fsrs!.card.last_review, undefined);
+ assert.equal(reset.dueAt, resetAt);
+ assert.equal(reset.intervalDays, 0);
+ assert.equal(reset.reviews, 22);
+ assert.equal(reset.lapses, 4);
+ assert.equal(reset.lastReviewedAt, snapshot.lastReviewedAt);
+ assert.equal(reset.revision, snapshot.revision + 1);
+ assert.deepEqual(reset.fsrs!.logs, snapshot.fsrs!.logs);
+ assert.notEqual(reset.fsrs!.logs, card.fsrs!.logs);
+ assert.deepEqual(reset.fsrs!.baseline, {kind: 'relearn', at: resetAt, reviews: 22, lapses: 4, logIndex: 2});
+ const next = applyRating(reset, 'again', resetAt);
+ assert.equal(next.reviews, 23);
+ assert.equal(next.lapses, 4);
+ assert.equal(next.fsrs!.logs.length, 3);
+ assert.equal(next.fsrs!.logs[2].state, State.New);
+ assert.equal(next.fsrs!.card.reps, 1);
+ assert.deepEqual(normalizeData(data([next]), resetAt).cards[0], next);
+ assert.deepEqual(card, snapshot);
+});
+
+test('relearn of a legacy card preserves its historical summaries without making log entries', () => {
+ const legacy = makeCard({reviews: 17, lapses: 2, lastReviewedAt: NOW - DAY_MS, intervalDays: 100, dueAt: NOW + DAY_MS, suspended: true});
+ const reset = resetScheduling(legacy, NOW);
+ assert.equal(reset.suspended, false);
+ assert.equal(reset.reviews, 17);
+ assert.equal(reset.lapses, 2);
+ assert.equal(reset.lastReviewedAt, legacy.lastReviewedAt);
+ assert.equal(reset.fsrs!.logs.length, 0);
+ assert.equal(reset.fsrs!.baseline.kind, 'relearn');
+});
+
+test('ratings preserve content/source/suspension but reject rollback before established memory', () => {
+ const original = {...fresh(), front: ' literal front ', back: '\nliteral back\n', suspended: true};
+ const card = applyRating(original, 'hard', NOW);
  for (const key of ['id', 'front', 'back', 'sourcePath', 'createdAt', 'suspended'] as const) assert.equal(card[key], original[key]);
- assert.equal(card.lastReviewedAt, NOW - 1000);
- assert.equal(card.updatedAt, NOW - 1000);
+ const before = JSON.stringify(card);
+ assert.throws(() => applyRating(card, 'good', NOW - 1), /predates the FSRS state/);
+ assert.throws(() => resetScheduling(card, NOW - 1), /predates the FSRS state/);
+ assert.equal(JSON.stringify(card), before);
+});
+
+test('normalization, previews and reset do not alias nested FSRS data or source evidence', () => {
+ const card = applyRating({...fresh(), sourceRef: {line: 1, endLine: 1, heading: 'H', excerpt: 'E', fingerprint: 'F'}}, 'easy', NOW);
+ const snapshot = structuredClone(card);
+ const normalized = normalizeData(data([freezeDeep(card)]), NOW).cards[0];
+ assert.notEqual(normalized.fsrs, card.fsrs);
+ assert.notEqual(normalized.fsrs!.card, card.fsrs!.card);
+ assert.notEqual(normalized.fsrs!.logs[0], card.fsrs!.logs[0]);
+ assert.notEqual(normalized.fsrs!.baseline, card.fsrs!.baseline);
+ assert.notEqual(normalized.fsrs!.parameters.w, card.fsrs!.parameters.w);
+ const next = applyRating(card, 'good', card.dueAt);
+ next.fsrs!.logs[0].review = 0;
+ (next.fsrs!.parameters.w as number[])[0] = 999;
+ next.fsrs!.card.stability = 999;
+ next.sourceRef!.heading = 'changed';
+ normalized.fsrs!.baseline.reviews = 900;
+ assert.deepEqual(card, snapshot);
+ assert.equal(FSRS_PARAMETERS.w[0], 0.212);
 });
 
 test('invalid ratings, counter overflow and date overflow throw without changing the card', () => {
- const card = makeCard();
+ const card = fresh();
  assert.throws(() => applyRating(card, 'wrong' as Rating, NOW), /Unknown flashcard rating/);
- for (const key of ['reviews', 'revision', 'lapses'] as const) {
+ for (const key of ['reviews', 'revision'] as const) {
   const original = makeCard({[key]: Number.MAX_SAFE_INTEGER});
   assert.throws(() => applyRating(original, 'again', NOW), CardValidationError);
   assert.equal(original[key], Number.MAX_SAFE_INTEGER);
  }
+ const lapseOverflow = applyRating(makeCard({lapses: Number.MAX_SAFE_INTEGER}), 'easy', NOW);
+ assert.throws(() => applyRating(lapseOverflow, 'again', lapseOverflow.dueAt), CardValidationError);
  assert.throws(() => applyRating(card, 'easy', 8_640_000_000_000_000), CardValidationError);
  assert.throws(() => applyRating({...card, back: ''}, 'good', NOW), CardValidationError);
  assert.equal(card.reviews, 0);
+});
+
+test('unknown or malformed FSRS metadata, parameters, state and logs fail closed', () => {
+ const card = applyRating(fresh(), 'easy', NOW);
+ const bad: Array<(value: any) => void> = [
+  c => {c.fsrs = null;}, c => {c.fsrs = undefined;}, c => {c.fsrs = {};},
+  c => {c.fsrs.schemaVersion = 2;}, c => {c.fsrs.algorithm = 'SM-2';}, c => {c.fsrs.implementation = 'other';},
+  c => {c.fsrs.implementationVersion = '6.0.0';}, c => {c.fsrs.parameterVersion = 'future';}, c => {c.fsrs.futureField = true;},
+  c => {c.fsrs.parameters.enable_fuzz = true;}, c => {c.fsrs.parameters.enable_short_term = false;},
+  c => {c.fsrs.parameters.request_retention = 0.8;}, c => {c.fsrs.parameters.maximum_interval = 100;},
+  c => {c.fsrs.parameters.w[0] += 0.01;}, c => {c.fsrs.parameters.w = new Array(21);},
+  c => {c.fsrs.parameters.learning_steps = ['5m'];}, c => {c.fsrs.parameters.relearning_steps = [];},
+  c => {c.fsrs.card.stability = NaN;}, c => {c.fsrs.card.difficulty = 0;}, c => {c.fsrs.card.difficulty = 11;},
+  c => {c.fsrs.card.due = '2026-01-01';}, c => {c.fsrs.card.last_review = null;}, c => {delete c.fsrs.card.last_review;},
+  c => {c.fsrs.card.state = 4;}, c => {c.fsrs.card.learning_steps = 1;}, c => {c.fsrs.card.reps = 0;},
+  c => {c.fsrs.card.lapses = 2;}, c => {c.fsrs.card.scheduled_days = 0;}, c => {c.fsrs.card.extra = true;},
+  c => {c.fsrs.logs = [];}, c => {c.fsrs.logs = new Array(1);}, c => {c.fsrs.logs[0].rating = 0;},
+  c => {c.fsrs.logs[0].review += 1;}, c => {c.fsrs.logs[0].due -= 1;}, c => {c.fsrs.logs[0].stability = 1;},
+  c => {delete c.fsrs.logs[0].last_elapsed_days;}, c => {c.fsrs.logs[0].scheduled_days = -1;},
+  c => {c.fsrs.baseline.kind = 'inferred';}, c => {c.fsrs.baseline.reviews = 1;}, c => {c.fsrs.baseline.logIndex = 1;},
+  c => {c.dueAt += 1;}, c => {c.intervalDays += 1;}, c => {c.reviews += 1;}, c => {c.lapses += 1;}, c => {c.lastReviewedAt += 1;},
+ ];
+ for (const mutate of bad) {
+  const raw = structuredClone(card); mutate(raw);
+  assert.throws(() => normalizeData(data([raw]), NOW), CardValidationError, mutate.toString());
+ }
+ for (const key of Object.keys(card.fsrs!)) {const raw = structuredClone(card); delete (raw.fsrs as any)[key]; invalid(data([raw]));}
+ for (const key of Object.keys(card.fsrs!.card)) {const raw = structuredClone(card); delete (raw.fsrs!.card as any)[key]; invalid(data([raw]));}
+});
+
+test('nested FSRS getters and inherited properties are never consumed', () => {
+ let calls = 0;
+ const getter = {get() {calls++; return 0;}, enumerable: true};
+ const mutations: Array<(c: Card) => void> = [
+  c => Object.defineProperty(c, 'fsrs', getter),
+  c => Object.defineProperty(c.fsrs!, 'card', getter),
+  c => Object.defineProperty(c.fsrs!.card, 'stability', getter),
+  c => Object.defineProperty(c.fsrs!.parameters.w, '0', getter),
+  c => Object.defineProperty(c.fsrs!.logs, '0', getter),
+  c => Object.defineProperty(c.fsrs!.logs[0], 'rating', getter),
+  c => Object.defineProperty(c.fsrs!.baseline, 'at', getter),
+  c => {c.fsrs!.card = Object.create(c.fsrs!.card);},
+ ];
+ for (const mutate of mutations) {const card = applyRating(fresh(), 'easy', NOW); mutate(card); invalid(data([card]));}
+ assert.equal(calls, 0);
+});
+
+test('review and learning schedules are identical across local timezone and DST boundaries', () => {
+ const script = `import {createCard,applyRating,DAY_MS} from './src/cards.ts';
+ const runs=[];for(const start of ['2026-03-08T06:30:00.123Z','2026-11-01T05:30:00.123Z']) {
+ let card=createCard('q','a','',Date.parse(start),'id');
+ for(const [rating,late] of [['good',0],['good',0],['easy',3],['again',7],['good',0]]) card=applyRating(card,rating,card.dueAt+late*DAY_MS);
+ runs.push(card); } console.log(JSON.stringify(runs));`;
+ const outputs = ['UTC', 'America/New_York', 'Asia/Shanghai'].map(TZ => execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {encoding: 'utf8', env: {...process.env, TZ}}));
+ assert.equal(outputs[1], outputs[0]);
+ assert.equal(outputs[2], outputs[0]);
 });
 
 test('due queue includes the exact boundary and excludes future or paused cards', () => {
@@ -244,6 +437,7 @@ test('invalid current times are rejected consistently by all time-dependent entr
   assert.throws(() => normalizeData(null, now), CardValidationError);
   assert.throws(() => createCard('q', 'a', '', now, 'id'), CardValidationError);
   assert.throws(() => applyRating(makeCard(), 'good', now), CardValidationError);
+  assert.throws(() => resetScheduling(makeCard(), now), CardValidationError);
   assert.throws(() => dueCards([], now), CardValidationError);
  }
 });

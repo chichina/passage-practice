@@ -1,9 +1,9 @@
 {
   "id": "passage-practice",
   "name": "Passage Practice",
-  "version": "1.3.1",
+  "version": "1.5.1",
   "minAppVersion": "1.6.6",
-  "description": "Local source-grounded knowledge candidates, passage recall and Q/A study in a native sidebar, with safe preview, progress backup and spaced review.",
+  "description": "Paragraph recall and flashcards with FSRS or day-based SM-2-OSR, ordered or shuffled sessions, and independent review history.",
   "author": "Passage Practice contributors",
   "isDesktopOnly": true
 }

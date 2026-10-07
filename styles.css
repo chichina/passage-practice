@@ -265,3 +265,14 @@
 .pp-candidate-face { padding:12px; margin:12px 0; border:1px solid var(--background-modifier-border); border-radius:8px; }
 .pp-candidate-face h3 { font-size:12px; color:var(--text-muted); margin:0 0 8px; }
 .pp-candidate-draft { margin:16px 0; }
+
+/* Main actions stay above optional configuration, including narrow sidebars. */
+.pp-primary-actions { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 4px; }
+.pp-primary-actions > button { flex:1 1 140px; min-height:40px; white-space:normal; }
+.pp-home-config { border:1px solid var(--background-modifier-border); border-radius:8px; margin:12px 0; padding:10px; }
+.pp-home-config > summary { cursor:pointer; color:var(--text-muted); overflow-wrap:anywhere; }
+.pp-home-config .pp-scope { margin-top:12px; }
+
+.pp-scope > details, .pp-scope > .pp-relearn { grid-column:1/-1; min-width:0; }
+.pp-home-config input:not([type="checkbox"]) { max-width:100%; min-width:0; }
+.pp-home-config .pp-relearn { overflow-wrap:anywhere; }

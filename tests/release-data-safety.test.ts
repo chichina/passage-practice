@@ -13,7 +13,7 @@ const bundle=await build({entryPoints:['src/main.ts'],bundle:true,write:false,fo
  b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'test'}));
  b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`${markdownObsidianDouble}
 
- export class Modal {} export class Plugin {} export class Notice {} export class TFile {}
+ export class Modal {} export class PluginSettingTab {} export class Setting {} export class Plugin {} export class Notice {} export class TFile {}
  export class App {} export class Editor {} export class MarkdownView {}
  export const getAllTags=()=>[];
  window.SafetyTFile=TFile;
@@ -26,7 +26,7 @@ const flush=()=>new Promise<void>(r=>setTimeout(r,0));
 const note=(heading:string)=>`# ${heading}\n\n- First meaningful concept is recorded carefully.\n- Second meaningful concept belongs to the same subject.`;
 
 function setup(persist?:(data:any)=>Promise<void>){
- const dom=new JSDOM('<body></body>',{runScripts:'outside-only'}),w=dom.window as any;
+ const dom=new JSDOM('<body></body>',{runScripts:'outside-only'}),w=dom.window as any;w.TextEncoder=TextEncoder;w.TextDecoder=TextDecoder;w.structuredClone=w.eval('(value)=>JSON.parse(JSON.stringify(value))');
  w.eval(`HTMLElement.prototype.empty=function(){this.replaceChildren()};HTMLElement.prototype.addClass=function(c){this.classList.add(c)};HTMLElement.prototype.createEl=function(tag,o={}){const e=document.createElement(tag);if(o.text!==undefined)e.textContent=o.text;if(o.cls)e.className=o.cls;for(const[k,v]of Object.entries(o.attr||{}))e.setAttribute(k,v);this.append(e);return e};HTMLElement.prototype.createDiv=function(o={}){return this.createEl('div',o)};`);
  w.eval(bundle.outputFiles[0].text+';window.SafetyTest=SafetyTest;');
  Object.defineProperty(w.crypto,'randomUUID',{value:()=>`safety-${Math.random()}`});
@@ -84,12 +84,12 @@ test('retrieved nested source evidence cannot mutate stored data without persist
 });
 
 test('authored-card source cannot change while its rating waits in the transaction queue',async()=>{
- const pendingWrite=deferred<void>();let first=true;const s=setup(async()=>{if(first){first=false;await pendingWrite.promise;}});try{const source=cardMarkup('authored_safety','Original question','Original answer');s.addFile('A.md',source);s.view.notes=[parseNote(source,'A.md')];const card=s.view.cards().cards[0];s.view.screen='card';s.view.current=card;s.view.queue=[card];s.view.revealed=true;s.view.render();const preceding=s.store.add('Existing queued question','Existing queued answer','');await flush();s.input('button[aria-label="记住了 · 3 天后"]').click();await flush();s.editFile('A.md',cardMarkup('authored_safety','Different question','Different answer'));pendingWrite.resolve();await preceding;await flush();assert.equal(s.writes(),1,'a stale question and answer must not receive a queued rating');assert.equal(s.store.cards.length,1);
+ const pendingWrite=deferred<void>();let first=true;const s=setup(async()=>{if(first){first=false;await pendingWrite.promise;}});try{const source=cardMarkup('authored_safety','Original question','Original answer');s.addFile('A.md',source);s.view.notes=[parseNote(source,'A.md')];const card=s.view.cards().cards[0];s.view.screen='card';s.view.current=card;s.view.queue=[card];s.view.revealed=true;s.view.render();const preceding=s.store.add('Existing queued question','Existing queued answer','');await flush();s.input('button[aria-label="记住了 · 10 分钟后"]').click();await flush();s.editFile('A.md',cardMarkup('authored_safety','Different question','Different answer'));pendingWrite.resolve();await preceding;await flush();assert.equal(s.writes(),1,'a stale question and answer must not receive a queued rating');assert.equal(s.store.cards.length,1);
  }finally{pendingWrite.resolve();s.dom.window.close();}
 });
 
 test('a newer completed index cannot legitimize a queued rating for older source text',async()=>{
- const pendingWrite=deferred<void>();let first=true;const s=setup(async()=>{if(first){first=false;await pendingWrite.promise;}});try{const source=cardMarkup('authored_safety','Original question','Original answer');s.addFile('A.md',source);s.view.notes=[parseNote(source,'A.md')];const card=s.view.cards().cards[0];s.view.screen='card';s.view.current=card;s.view.queue=[card];s.view.revealed=true;s.view.render();const preceding=s.store.add('Existing queued question','Existing queued answer','');await flush();s.input('button[aria-label="记住了 · 3 天后"]').click();await flush();s.editFile('A.md',cardMarkup('authored_safety','Different question','Different answer'));await s.view.refresh(true);pendingWrite.resolve();await preceding;await flush();assert.equal(s.writes(),1,'the transaction must retain its own verified source baseline');assert.equal(s.store.cards.length,1);
+ const pendingWrite=deferred<void>();let first=true;const s=setup(async()=>{if(first){first=false;await pendingWrite.promise;}});try{const source=cardMarkup('authored_safety','Original question','Original answer');s.addFile('A.md',source);s.view.notes=[parseNote(source,'A.md')];const card=s.view.cards().cards[0];s.view.screen='card';s.view.current=card;s.view.queue=[card];s.view.revealed=true;s.view.render();const preceding=s.store.add('Existing queued question','Existing queued answer','');await flush();s.input('button[aria-label="记住了 · 10 分钟后"]').click();await flush();s.editFile('A.md',cardMarkup('authored_safety','Different question','Different answer'));await s.view.refresh(true);pendingWrite.resolve();await preceding;await flush();assert.equal(s.writes(),1,'the transaction must retain its own verified source baseline');assert.equal(s.store.cards.length,1);
  }finally{pendingWrite.resolve();s.dom.window.close();}
 });
 

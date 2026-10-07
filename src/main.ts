@@ -1,3 +1,6 @@
+import {PracticeSettingTab} from './settings';
+import {VaultJsonStorage} from './vault-storage';
+import {normalizeStudyData} from './decks';
 import {LocationStore} from './practice-location';
 import {MarkdownPreviewScope} from './markdown-preview';
 import { App, Editor, MarkdownRenderChild, MarkdownView, Modal, Notice, Plugin, TFile } from 'obsidian';
@@ -6,7 +9,7 @@ import { mountComparison } from './comparison';
 import { CardStore } from './card-store';
 import { CardsModal, CardSeed } from './card-modal';
 import {StudyView,STUDY_VIEW} from './study-view';
-import {cardMarkup,parseCardBlock,assertSafeAppend} from './study-source';
+import {parseCardBlock,selectionSourceRef,passageSourceRef} from './study-source';
 export { StudyView } from './study-view';
 export { CardsModal } from './card-modal';
 export { CardStore } from './card-store';
@@ -54,7 +57,7 @@ export class PracticeModal extends Modal {
    const row=body.createDiv({cls:'pp-actions'});
    const retry=this.button(row,'只练这些漏点',()=>{if(s.retry())this.render();},true);retry.disabled=!s.points().length;
    const save=this.button(row,this.saved?'已保存新复习笔记':'保存为新复习笔记',()=>void this.save(save));save.disabled=this.saving||this.saved;
-   if(this.makeCard)this.button(row,'制成复习卡片',()=>this.makeCard!({front:s.question,back:s.target,sourcePath:this.sourceFile?.path||this.sourcePath}));
+   if(this.makeCard)this.button(row,'制成复习卡片',()=>this.makeCard!({front:s.question,back:s.target,sourcePath:this.sourceFile?.path||this.sourcePath,sourceRef:passageSourceRef({text:s.source,question:s.fallback,path:this.sourceFile?.path||this.sourcePath,line:0,kind:'selection'})}));
    body.createEl('p',{text:'保存笔记或卡片才会写入；结束或 Esc 不保存临时练习。使用本次开始时的快照。',cls:'pp-footnote'});
   }
   const bottom=root.createDiv({cls:'pp-bottom'});bottom.createEl('span',{text:'临时练习 · 手工自测 · 原笔记不改动'});this.button(bottom,'结束练习',()=>this.close());
@@ -79,8 +82,15 @@ export default class PassagePractice extends Plugin {
  async onload() {
   const locationPath=`${this.manifest.dir}/practice-location.json`;
   try {const raw=await this.app.vault.adapter.exists(locationPath)?JSON.parse(await this.app.vault.adapter.read(locationPath)):{version:1};this.locations=new LocationStore(raw,value=>this.app.vault.adapter.write(locationPath,JSON.stringify(value,null,2)));}catch{this.locationError='上次位置无法安全读取，位置保存已停用；请保留原文件后检查。卡片与临时练习不受影响。';new Notice(this.locationError,10000);}
-  try {this.store=new CardStore(await this.loadData(),data=>this.saveData(data));}
-  catch{this.storageError='卡片数据无法安全读取，已停止卡片写入。请备份插件 data.json 后检查；段落复习仍可使用。';new Notice(this.storageError,10000);}
+  try {const legacyPath=`${this.manifest.dir}/data.json`,adapter=this.app.vault.adapter;
+   const legacy=await adapter.exists('Passage Practice')?null:await adapter.exists(legacyPath)?await adapter.read(legacyPath):null;
+   const storage=await VaultJsonStorage.open(adapter,legacy,value=>normalizeStudyData(value));
+   if(storage.readOnly)throw new Error(storage.problem||'存储只读');
+   const initial=storage.data||normalizeStudyData(null);
+   if(storage.source!=='vault')await storage.persist(initial);
+   this.store=new CardStore(initial,data=>storage.persist(data));
+  }catch(e){this.storageError='卡片写入已停用：'+(e instanceof Error?e.message:String(e))+'。请保留 Passage Practice 目录和旧 data.json 后检查；段落复习仍可使用。';new Notice(this.storageError,10000);}
+  this.addSettingTab(new PracticeSettingTab(this.app,this));
   this.currentPath=this.app.workspace.getActiveFile()?.path||'';this.lastMarkdown=this.app.workspace.getActiveViewOfType(MarkdownView);
   this.registerEvent(this.app.workspace.on('active-leaf-change',leaf=>{if(leaf?.view instanceof MarkdownView){this.lastMarkdown=leaf.view;this.currentPath=leaf.view.file?.path||'';this.notify();}}));
   this.registerView(STUDY_VIEW,leaf=>new StudyView(leaf,this));
@@ -98,13 +108,14 @@ export default class PassagePractice extends Plugin {
   this.registerEvent(this.app.workspace.on('editor-menu',(menu,editor,view)=>{if(editor.getSelection().trim()){menu.addItem(item=>item.setTitle('在侧栏复习选段').setIcon('book-open-check').onClick(()=>this.start(editor,view.file)));menu.addItem(item=>item.setTitle('制成问答卡片').setIcon('gallery-vertical-end').onClick(()=>this.cardFromSelection(editor,view.file)));}}));
   this.registerMarkdownCodeBlockProcessor('practice-card',(source,el,ctx)=>{try{const card=parseCardBlock(source);const box=el.createDiv({cls:'pp-authored-card'});box.createEl('span',{text:'问答卡片',cls:'pp-authored-label'});for(const [label,value]of [['正面 · 问题',card.front],['背面 · 答案',card.back]]){const face=box.createDiv();face.createEl('span',{text:label,cls:'pp-face-label'});const previews=new MarkdownPreviewScope(this.app);const child=new MarkdownRenderChild(face);child.onunload=()=>previews.reset();ctx.addChild(child);previews.mount(face,value,ctx.sourcePath);}box.createEl('p',{text:'点左侧「回想练习」图标，按问题自测',cls:'pp-footnote'});}catch(e){el.createEl('p',{text:'卡片标记未完成：'+(e as Error).message,cls:'pp-error'});el.createEl('pre',{text:source});}});
  }
+ refreshStudyViews(){this.notify();}
  private notify(){window.clearTimeout(this.refreshTimer);this.refreshTimer=window.setTimeout(()=>{for(const leaf of this.app.workspace.getLeavesOfType(STUDY_VIEW))(leaf.view as StudyView).notifyChanged();},200);}
  async openStudy():Promise<StudyView>{if(this.opening)return this.opening;this.opening=(async()=>{let leaf=this.app.workspace.getLeavesOfType(STUDY_VIEW)[0];if(!leaf){leaf=this.app.workspace.getRightLeaf(false)!;if(!leaf)throw new Error('无法创建侧栏');await leaf.setViewState({type:STUDY_VIEW,active:true});}this.app.workspace.rightSplit.expand();this.app.workspace.revealLeaf(leaf);return leaf.view as StudyView;})();try{return await this.opening;}finally{this.opening=null;}}
  shield(on:boolean){const el=this.app.workspace.containerEl;if(el.classList.contains('pp-recall-shield')!==on)el.toggleClass('pp-recall-shield',on);}
  activeEditor():MarkdownView|null{if(this.lastMarkdown?.file?.path===this.currentPath&&this.lastMarkdown.getMode()==='source'&&this.app.workspace.getLeavesOfType('markdown').some(l=>l.view===this.lastMarkdown))return this.lastMarkdown;const matches=this.app.workspace.getLeavesOfType('markdown').map(l=>l.view).filter((v):v is MarkdownView=>v instanceof MarkdownView&&v.file?.path===this.currentPath&&v.getMode()==='source');return matches.length===1?matches[0]:null;}
- private start(editor:Editor,file:TFile|null){const text=editor.getSelection();if(!text.trim()||editor.listSelections().length!==1||text.length>50000){new Notice('请先选择一段连续文字，最多 50,000 字符');return;}const path=file?.path||'',line=editor.getCursor('from').line,question=defaultQuestion(editor.getValue(),line,file?.basename||'回忆这段内容');this.currentPath=path;void this.openStudy().then(view=>view.startSelection({text,question,path,line}));}
- private cardFromSelection(editor:Editor,file:TFile|null){const text=editor.getSelection();if(!text.trim()||editor.listSelections().length!==1||text.length>50000){new Notice('请先选择一段连续文字，最多 50,000 字符');return;}const sourcePath=file?.path||'',front=defaultQuestion(editor.getValue(),editor.getCursor('from').line,file?.basename||'回忆这段内容');this.currentPath=sourcePath;void this.openStudy().then(view=>view.openSeed({front,back:text,sourcePath}));}
- async insertCard(seed:CardSeed):Promise<void>{const view=this.activeEditor();if(!view||view.file?.path!==seed.sourcePath||this.currentPath!==seed.sourcePath)throw new Error('当前笔记已切换或不可编辑，请返回后重新插入');const content=view.editor.getValue();assertSafeAppend(content);const markup=cardMarkup(crypto.randomUUID(),seed.front,seed.back);const last=view.editor.lastLine(),cursor={line:last,ch:view.editor.getLine(last).length};view.editor.replaceRange('\n\n'+markup+'\n',cursor);this.notify();}
+ private start(editor:Editor,file:TFile|null){const text=editor.getSelection();if(!text.trim()||editor.listSelections().length!==1||text.length>50000){new Notice('请先选择一段连续文字，最多 50,000 字符');return;}const path=file?.path||'',line=editor.getCursor('from').line,question=defaultQuestion(editor.getValue(),line,file?.basename||'回忆这段内容');const sourceRef=selectionSourceRef(editor.getValue(),text,path,line);this.currentPath=path;void this.openStudy().then(view=>view.startSelection({text,question,path,line,kind:'selection',sourceRef}));}
+ private cardFromSelection(editor:Editor,file:TFile|null){const text=editor.getSelection();if(!text.trim()||editor.listSelections().length!==1||text.length>50000){new Notice('请先选择一段连续文字，最多 50,000 字符');return;}const sourcePath=file?.path||'',front=defaultQuestion(editor.getValue(),editor.getCursor('from').line,file?.basename||'回忆这段内容');const sourceRef=selectionSourceRef(editor.getValue(),text,sourcePath,editor.getCursor('from').line);this.currentPath=sourcePath;void this.openStudy().then(view=>view.openSeed({front,back:text,sourcePath,sourceRef}));}
+ async insertCard(seed:CardSeed):Promise<void>{if(!this.store)throw new Error(this.storageError||'卡片存储不可用');await this.store.add(seed.front,seed.back,seed.sourcePath,Date.now(),undefined,seed.sourceRef);this.notify();}
 
  onunload(){window.clearTimeout(this.refreshTimer);this.shield(false);this.app.workspace.detachLeavesOfType(STUDY_VIEW);}
 }

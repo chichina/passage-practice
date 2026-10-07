@@ -14,7 +14,7 @@ const bundle=await build({entryPoints:['src/main.ts'],bundle:true,write:false,fo
  export class Modal {}
  export class ItemView {constructor(leaf){this.app=leaf.app;this.containerEl=document.createElement('div');this.contentEl=this.containerEl.appendChild(document.createElement('div'));this.containerEl.getBoundingClientRect=()=>({width:300,height:600});}addAction(){} async setState(){}}
  export const getAllTags=cache=>cache.tags||[];
- export class Plugin {constructor(app){this.app=app;}}
+ export class PluginSettingTab {} export class Setting {} export class Plugin {constructor(app){this.app=app;}}
  export class Notice {}
  export class TFile {}
  export class App {}
@@ -25,7 +25,7 @@ const bundle=await build({entryPoints:['src/main.ts'],bundle:true,write:false,fo
 }}]});
 
 function boot(){
- const dom=new JSDOM('<body></body>',{runScripts:'outside-only'}),w=dom.window as any;
+ const dom=new JSDOM('<body></body>',{runScripts:'outside-only'}),w=dom.window as any;w.structuredClone=w.eval('(value)=>JSON.parse(JSON.stringify(value))');
  w.eval(`HTMLElement.prototype.empty=function(){this.replaceChildren()};HTMLElement.prototype.addClass=function(c){this.classList.add(c)};`);
  w.eval(bundle.outputFiles[0].text+';window.ReviewTest=ReviewTest;');
  return {dom,w};
@@ -94,10 +94,10 @@ test('a collapsed sidebar stays unshielded when a pending write completes',async
 test('selection source is captured before asynchronous sidebar opening',async()=>{
  const {dom,w}=boot(),plugin=new w.ReviewTest.default({}),opened=deferred<any>();let result:any;
  plugin.openStudy=()=>opened.promise;
- const editor={getSelection:()=> 'selection from A',listSelections:()=>[1],getValue:()=> '# A title\nselected',getCursor:()=>({line:1,ch:0})};
- plugin.start(editor,{path:'A.md',basename:'A'});plugin.currentPath='B.md';
+ let source='# A title\nselection from A',line=1;const editor={getSelection:()=> 'selection from A',listSelections:()=>[1],getValue:()=>source,getCursor:()=>({line,ch:0})};
+ plugin.start(editor,{path:'A.md',basename:'A'});plugin.currentPath='B.md';source='# B title\nDifferent text';line=0;
  opened.resolve({startSelection:(value:any)=>{result=value;}});await Promise.resolve();
- assert.equal(result.path,'A.md');assert.equal(result.question,'A title');assert.equal(result.line,1);dom.window.close();
+ assert.equal(result.path,'A.md');assert.equal(result.question,'A title');assert.equal(result.line,1);assert.equal(result.sourceRef.excerpt,'selection from A');assert.equal(result.sourceRef.line,1);assert.equal(result.sourceRef.heading,'A title');dom.window.close();
 });
 
 test('two splits of the same file resolve to the last active Markdown editor',()=>{
@@ -108,13 +108,13 @@ test('two splits of the same file resolve to the last active Markdown editor',()
  assert.equal(plugin.activeEditor(),second);dom.window.close();
 });
 
-test('card insertion appends safely and preserves every existing source character',async()=>{
+test('legacy insertion entry now saves independently and preserves all source bytes',async()=>{
  const {dom,w}=boot(),view=new w.__ReviewMarkdownView();let text='```js\nconst before = 1;\nconst after = 2;\n```';const original=text;
  Object.defineProperty(w.crypto,'randomUUID',{value:()=> 'test_insert_001'});
  view.file={path:'A.md'};view.editor={getValue:()=>text,lastLine:()=>text.split('\n').length-1,getLine:(line:number)=>text.split('\n')[line],getCursor:()=>({line:1,ch:2}),replaceRange:(insert:string,cursor:{line:number,ch:number})=>{const rows=text.split('\n');const offset=rows.slice(0,cursor.line).reduce((n:number,row:string)=>n+row.length+1,0)+cursor.ch;text=text.slice(0,offset)+insert+text.slice(offset);}};
- const plugin=new w.ReviewTest.default({workspace:{getLeavesOfType:()=>[{view}]}});plugin.currentPath='A.md';plugin.lastMarkdown=view;plugin.notify=()=>{};
+ const plugin=new w.ReviewTest.default({workspace:{getLeavesOfType:()=>[{view}]}});plugin.currentPath='A.md';plugin.lastMarkdown=view;plugin.notify=()=>{};let saved:any;plugin.store={add:async(front:string,back:string,sourcePath:string)=>{saved={front,back,sourcePath};}};
  await plugin.insertCard({front:'Q',back:'A',sourcePath:'A.md'});
- assert.equal(text.slice(0,original.length),original);assert.equal(parseNote(text,'A.md').cards.length,1);dom.window.close();
+ assert.equal(text,original);assert.equal(parseNote(text,'A.md').cards.length,0);assert.deepEqual(saved,{front:'Q',back:'A',sourcePath:'A.md'});dom.window.close();
 });
 
 test('cancelled scan never replaces completed index and can restart',async()=>{const s=setup();s.view.notes=[parseNote('previous','A.md')];const pending=s.view.refresh();s.view.cancelScan();s.reads[0].resolve('cancelled');assert.equal(await pending,false);assert.equal(s.view.notes[0].passages[0].text,'previous');const next=s.view.refresh();s.reads[1].resolve('restarted');assert.equal(await next,true);assert.equal(s.view.notes[0].passages[0].text,'restarted');s.dom.window.close();});

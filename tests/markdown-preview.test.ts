@@ -12,13 +12,13 @@ const bundle=await build({stdin:{contents:"export * from './src/main';export * f
  b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'test'}));b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`${markdownObsidianDouble}
  export class Modal {constructor(app){this.app=app;this.containerEl=document.createElement('div');this.modalEl=this.containerEl.createDiv();this.contentEl=this.modalEl.createDiv();}open(){document.body.append(this.containerEl);this.onOpen();}close(){this.onClose();this.containerEl.remove();}}
  export class ItemView {constructor(leaf){this.app=leaf.app;this.containerEl=document.createElement('div');this.contentEl=this.containerEl.createDiv();this.containerEl.getBoundingClientRect=()=>({width:400,height:700});}addAction(){} async setState(){}}
- export class Plugin {} export class Notice {} export class TFile {} export class App {} export class Editor {} export class MarkdownView {} export const getAllTags=()=>[];
+ export class PluginSettingTab {} export class Setting {} export class Plugin {} export class Notice {} export class TFile {} export class App {} export class Editor {} export class MarkdownView {} export const getAllTags=()=>[];
  window.MarkdownDouble={Component,MarkdownRenderChild,TFile};`,loader:'js'}));
 }}]});
 const flush=()=>new Promise<void>(resolve=>setTimeout(resolve,0));
 function deferred(){let resolve!:()=>void,reject!:(error:Error)=>void;const promise=new Promise<void>((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
 function setup(){
- const dom=new JSDOM('<body><main></main></body>',{runScripts:'outside-only'}),w=dom.window as any;
+ const dom=new JSDOM('<body><main></main></body>',{runScripts:'outside-only'}),w=dom.window as any;w.structuredClone=w.eval('(value)=>JSON.parse(JSON.stringify(value))');
  w.eval(`HTMLElement.prototype.empty=function(){this.replaceChildren()};HTMLElement.prototype.addClass=function(c){this.classList.add(c)};HTMLElement.prototype.createEl=function(tag,o={}){const e=document.createElement(tag);if(o.text!==undefined)e.textContent=o.text;if(o.cls)e.className=o.cls;for(const[k,v]of Object.entries(o.attr||{}))e.setAttribute(k,v);this.append(e);return e};HTMLElement.prototype.createDiv=function(o={}){return this.createEl('div',o)};`);
  w.eval(bundle.outputFiles[0].text+';window.MarkdownTest=MarkdownTest;');
  const opened:any[][]=[];let reads=0,writes=0;
@@ -63,7 +63,7 @@ for(const action of ['close','retry']as const)test(`practice modal ${action} dur
 });
 
 for(const action of ['next section','home','close']as const)test(`study ${action} while Markdown render is pending cannot publish the old answer`,async()=>{
- const s=setup();try{const note=parseNote('# First\n\nOld secret answer.\n\n# Second\n\nFresh secret answer.','学习/Topic.md'),host={app:s.app,currentPath:note.path,store:null,storageError:'',shield(){},activeEditor:()=>null};const view=new s.w.MarkdownTest.StudyView({app:s.app},host);view.notes=[note];s.w.document.body.append(view.containerEl);view.render();s.w.document.querySelector('.pp-passage-choice').click();s.button('揭晓并对照')!.click();const call=s.pending[0];assert.equal(call.sourcePath,note.path);
+ const s=setup();try{const note=parseNote('# First\n\nOld secret answer.\n\n# Second\n\nFresh secret answer.','学习/Topic.md'),host={app:s.app,currentPath:note.path,store:null,storageError:'',shield(){},activeEditor:()=>null};const view=new s.w.MarkdownTest.StudyView({app:s.app},host);view.notes=[note];s.w.document.body.append(view.containerEl);view.render();s.w.document.querySelector('.pp-passage-choice').click();s.button('揭晓并对照')!.click();await flush();const call=s.pending.at(-1)!;assert.equal(call.sourcePath,note.path);assert.equal(call.owner.loaded,true,'the current Markdown render remains pending after source navigation settles');
   if(action==='next section')s.button('下一节')!.click();else if(action==='home')s.button('返回学习')!.click();else await view.onClose();assertReleased(call);call.done.resolve();await flush();assertReleased(call);assert.equal(s.w.document.querySelectorAll('.pp-markdown').length,0);assert.ok(!s.w.document.body.textContent.includes('Old secret answer.'));assert.ok(!s.w.document.body.textContent.includes('Fresh secret answer.'));if(action==='next section')assert.equal(view.session.question,'Second');assert.equal(s.writes(),0);
  }finally{s.dom.window.close();}
 });

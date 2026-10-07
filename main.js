@@ -1,4 +1,4 @@
-/* Passage Practice 1.3.1 | Copyright 2026 Passage Practice contributors | MIT License */
+/* Passage Practice 1.5.1 | Copyright 2026 Passage Practice contributors | MIT License */
 "use strict";
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -30,6 +30,2583 @@ __export(main_exports, {
   default: () => PassagePractice
 });
 module.exports = __toCommonJS(main_exports);
+
+// src/settings.ts
+var import_obsidian = require("obsidian");
+var PracticeSettingTab = class extends import_obsidian.PluginSettingTab {
+  constructor(app, host) {
+    super(app, host);
+    this.host = host;
+  }
+  display() {
+    const root = this.containerEl;
+    root.empty();
+    root.createEl("h2", { text: "\u56DE\u60F3\u7EC3\u4E60" });
+    const store = this.host.store;
+    if (!store) {
+      root.createEl("p", { text: this.host.storageError || "\u5361\u7247\u5B58\u50A8\u5C1A\u672A\u5C31\u7EEA" });
+      return;
+    }
+    new import_obsidian.Setting(root).setName("\u590D\u4E60\u7B97\u6CD5").setDesc("\u5207\u6362\u53EA\u4FDD\u5B58\u504F\u597D\uFF0C\u73B0\u6709\u5230\u671F\u65F6\u95F4\u548C\u8BC4\u5206\u5386\u53F2\u4FDD\u7559\u3002\u4E0B\u6B21\u771F\u5B9E\u8BC4\u5206\u624D\u5F00\u59CB\u6240\u9009\u7B97\u6CD5\u7684\u65B0\u8C03\u5EA6\u9636\u6BB5\u3002").addDropdown((drop) => {
+      drop.addOption("fsrs", "FSRS \xB7 \u8BB0\u5FC6\u6A21\u578B").addOption("sm2-osr", "Spaced Repetition \xB7 \u6309\u5929").setValue(store.schedulingAlgorithm).onChange(async (value) => {
+        drop.setDisabled(true);
+        try {
+          await store.setSchedulingAlgorithm(value);
+          this.host.refreshStudyViews();
+          new import_obsidian.Notice("\u5DF2\u4FDD\u5B58\u590D\u4E60\u7B97\u6CD5\uFF0C\u539F\u5230\u671F\u65F6\u95F4\u548C\u5386\u53F2\u4FDD\u7559");
+        } catch (error) {
+          new import_obsidian.Notice(error instanceof Error ? error.message : "\u7B97\u6CD5\u4FDD\u5B58\u5931\u8D25");
+        } finally {
+          drop.setValue(store.schedulingAlgorithm);
+          drop.setDisabled(false);
+        }
+      });
+    });
+    root.createEl("p", { text: "FSRS \u4F7F\u7528\u8BB0\u5FC6\u6A21\u578B\uFF1BSpaced Repetition \u4F7F\u7528 SM-2-OSR \u9ED8\u8BA4\u516C\u5F0F\uFF0C\u6309\u672C\u5730\u65E5\u671F\u8BA1\u7B97\u5230\u671F\u3002\u6309\u5929\u6A21\u5F0F\u300C\u5FD8\u4E86\u300D\u4ECA\u5929\u5230\u671F\uFF1B\u53EF\u5728\u4FA7\u680F\u5B66\u4E60\u9009\u9879\u4E2D\u542F\u7528\u672C\u8F6E\u518D\u7EC3\u4E00\u6B21\u3002" });
+  }
+};
+
+// src/vault-storage.ts
+var VAULT_STORAGE_DIRECTORY = "Passage Practice";
+var VAULT_STATE_PATH = `${VAULT_STORAGE_DIRECTORY}/state.json`;
+var VAULT_LEGACY_ARCHIVE_PATH = `${VAULT_STORAGE_DIRECTORY}/migration/legacy-data.json`;
+var VAULT_STORAGE_MARKER_PATH = `${VAULT_STORAGE_DIRECTORY}/storage-info.json`;
+var VAULT_TRANSACTION_PATH = `${VAULT_STORAGE_DIRECTORY}/.transaction.json`;
+var MARKER = JSON.stringify({ owner: "passage-practice", storageVersion: 1 }) + "\n";
+var ROOT = VAULT_STORAGE_DIRECTORY;
+var HISTORY = `${ROOT}/history`;
+var VaultStorageError = class extends Error {
+  constructor(message, code) {
+    super(message);
+    this.code = code;
+    this.name = "VaultStorageError";
+  }
+};
+var errorText = (error) => error instanceof Error ? error.message : String(error);
+var token = () => {
+  var _a2, _b, _c;
+  return (_c = (_b = (_a2 = globalThis.crypto) == null ? void 0 : _a2.randomUUID) == null ? void 0 : _b.call(_a2)) != null ? _c : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+};
+var nextPath = (id) => `${ROOT}/.pending-${id}.json`;
+var backupPath = (id) => `${HISTORY}/state-${id}.json`;
+var VaultJsonStorage = class _VaultJsonStorage {
+  constructor(adapter, legacyRawText, validate) {
+    this.adapter = adapter;
+    this.legacyRawText = legacyRawText;
+    this.validate = validate;
+    __publicField(this, "value", null);
+    __publicField(this, "raw", null);
+    __publicField(this, "origin", "empty");
+    __publicField(this, "locked", false);
+    __publicField(this, "issue", null);
+    __publicField(this, "initialized", false);
+    __publicField(this, "pending", Promise.resolve());
+  }
+  static async open(adapter, legacyRawText, validate) {
+    const storage = new _VaultJsonStorage(adapter, legacyRawText, validate);
+    try {
+      if (await adapter.exists(ROOT)) {
+        storage.origin = "vault";
+        await storage.assertOwned();
+        storage.initialized = true;
+        if (await adapter.exists(VAULT_TRANSACTION_PATH)) await storage.recover();
+        const raw = await storage.readOptional(VAULT_STATE_PATH);
+        if (raw === null) throw new Error(`Missing committed state: ${VAULT_STATE_PATH}. Restore it from a known-good backup; no empty deck was created.`);
+        storage.accept(raw);
+      } else if (legacyRawText !== null) {
+        storage.origin = "legacy";
+        storage.accept(legacyRawText);
+      }
+    } catch (error) {
+      storage.lock(`Storage is read-only: ${errorText(error)}`);
+    }
+    return storage;
+  }
+  get data() {
+    return this.value === null ? null : structuredClone(this.value);
+  }
+  get rawText() {
+    return this.raw;
+  }
+  get source() {
+    return this.origin;
+  }
+  get readOnly() {
+    return this.locked;
+  }
+  get problem() {
+    return this.issue;
+  }
+  /** Serialized in this instance; rejected saves do not publish new memory state. */
+  persist(data) {
+    let raw;
+    try {
+      const json = JSON.stringify(data, null, 2);
+      if (json === void 0) throw new Error("The deck is not JSON serializable.");
+      raw = json + "\n";
+      this.decode(raw);
+    } catch (error) {
+      return Promise.reject(new VaultStorageError(`Invalid deck: ${errorText(error)}`, "invalid"));
+    }
+    const work = this.pending.then(async () => {
+      var _a2;
+      if (this.locked) throw new VaultStorageError((_a2 = this.issue) != null ? _a2 : "Storage is read-only.", "read-only");
+      if (!this.initialized) await this.initialize(raw);
+      else await this.commit(raw);
+    });
+    this.pending = work.catch(() => {
+    });
+    return work;
+  }
+  decode(raw) {
+    return this.validate(JSON.parse(raw));
+  }
+  accept(raw) {
+    const value = this.decode(raw);
+    this.value = value;
+    this.raw = raw;
+  }
+  lock(message) {
+    this.locked = true;
+    this.issue = message;
+  }
+  conflict(message) {
+    this.lock(message);
+    throw new VaultStorageError(message, "conflict");
+  }
+  async readOptional(path) {
+    return await this.adapter.exists(path) ? await this.adapter.read(path) : null;
+  }
+  async assertOwned() {
+    if (await this.readOptional(VAULT_STORAGE_MARKER_PATH) !== MARKER) {
+      throw new Error(`\u201C${ROOT}\u201D already exists without the expected Passage Practice ownership marker. Its contents were not changed. Rename that folder or choose another vault before trying again.`);
+    }
+  }
+  async writeVerified(path, raw) {
+    if (await this.adapter.exists(path)) this.conflict(`Refusing to overwrite an existing staging file: ${path}`);
+    await this.adapter.write(path, raw);
+    if (await this.adapter.read(path) !== raw) throw new Error(`Write verification failed: ${path}`);
+  }
+  async assertCurrent() {
+    try {
+      await this.assertOwned();
+    } catch (error) {
+      this.conflict(errorText(error));
+    }
+    if (await this.readOptional(VAULT_STATE_PATH) !== this.raw) {
+      this.conflict(`The vault deck changed outside this window. Reload Passage Practice before saving; ${VAULT_STATE_PATH} was not overwritten.`);
+    }
+    if (await this.adapter.exists(VAULT_TRANSACTION_PATH)) {
+      this.conflict("Another or interrupted save is present. Reload Passage Practice to recover it before saving.");
+    }
+  }
+  async initialize(raw) {
+    if (await this.adapter.exists(ROOT)) this.conflict(`\u201C${ROOT}\u201D appeared after loading. Reload before saving; the existing folder was not changed.`);
+    const staging = `.passage-practice-init-${token()}`;
+    if (await this.adapter.exists(staging)) throw new VaultStorageError("Initialization staging path already exists. Try again.", "io");
+    try {
+      await this.adapter.mkdir(staging);
+      await this.writeVerified(`${staging}/storage-info.json`, MARKER);
+      await this.adapter.mkdir(`${staging}/history`);
+      if (this.legacyRawText !== null) {
+        await this.adapter.mkdir(`${staging}/migration`);
+        await this.writeVerified(`${staging}/migration/legacy-data.json`, this.legacyRawText);
+      }
+      await this.writeVerified(`${staging}/state.json`, raw);
+      if (await this.adapter.exists(ROOT)) this.conflict(`\u201C${ROOT}\u201D appeared during initialization. Its contents were not changed.`);
+      try {
+        await this.adapter.rename(staging, ROOT);
+      } catch (error) {
+        if (!await this.isPublishedInitialization(raw, staging)) throw error;
+      }
+      if (!await this.isPublishedInitialization(raw, staging)) this.conflict("Initialized storage could not be verified. Reload before making more changes.");
+      this.initialized = true;
+      this.origin = "vault";
+      this.accept(raw);
+    } catch (error) {
+      if (error instanceof VaultStorageError) throw error;
+      throw new VaultStorageError(`Could not initialize vault storage: ${errorText(error)}`, "io");
+    }
+  }
+  async isPublishedInitialization(raw, staging) {
+    return !await this.adapter.exists(staging) && await this.readOptional(VAULT_STORAGE_MARKER_PATH) === MARKER && await this.readOptional(VAULT_STATE_PATH) === raw && (this.legacyRawText === null || await this.readOptional(VAULT_LEGACY_ARCHIVE_PATH) === this.legacyRawText);
+  }
+  async commit(raw) {
+    await this.assertCurrent();
+    if (raw === this.raw) return;
+    const id = token();
+    const next = nextPath(id);
+    const backup = backupPath(id);
+    const transaction = { owner: "passage-practice", version: 1, id, previousRaw: this.raw, nextRaw: raw };
+    const journal = JSON.stringify(transaction) + "\n";
+    const journalStaging = `${ROOT}/.pending-${id}.transaction.json`;
+    let journalPublished = false;
+    try {
+      await this.writeVerified(next, raw);
+      await this.writeVerified(journalStaging, journal);
+      await this.assertCurrent();
+      if (await this.adapter.exists(backup)) this.conflict(`Refusing to replace an existing backup: ${backup}`);
+      await this.adapter.rename(journalStaging, VAULT_TRANSACTION_PATH);
+      journalPublished = true;
+      await this.requireJournal(journal);
+      if (await this.readOptional(VAULT_STATE_PATH) !== this.raw) this.conflict("The deck changed while preparing this save. All versions have been retained; reload to inspect the conflict.");
+      if (await this.adapter.read(next) !== raw) this.conflict("The staged deck changed before commit. The current deck was retained; reload before saving.");
+      await this.adapter.rename(VAULT_STATE_PATH, backup);
+      if (await this.adapter.read(backup) !== this.raw) {
+        if (!await this.adapter.exists(VAULT_STATE_PATH)) await this.adapter.rename(backup, VAULT_STATE_PATH);
+        this.conflict("The deck changed during the save. The external version was retained; reload before saving.");
+      }
+      await this.requireJournal(journal);
+      if (await this.adapter.read(next) !== raw) throw new Error("The staged deck changed during commit.");
+      if (await this.adapter.exists(VAULT_STATE_PATH)) this.conflict("Another writer created a deck during this save. Its file and the previous version were retained.");
+      await this.adapter.rename(next, VAULT_STATE_PATH);
+      if (await this.adapter.read(VAULT_STATE_PATH) !== raw) this.conflict("The committed deck changed before verification. Reload before saving.");
+      this.accept(raw);
+      await this.cleanupCommittedJournal(journal);
+    } catch (error) {
+      try {
+        const foundJournal = await this.readOptional(VAULT_TRANSACTION_PATH);
+        if (foundJournal === journal) {
+          journalPublished = true;
+          const current = await this.readOptional(VAULT_STATE_PATH);
+          const previous = await this.readOptional(backup);
+          if (current === raw && previous === transaction.previousRaw && !this.locked) {
+            this.accept(raw);
+            await this.cleanupCommittedJournal(journal);
+            return;
+          }
+          if (!this.locked && current === null && previous === transaction.previousRaw) {
+            await this.adapter.rename(backup, VAULT_STATE_PATH);
+            if (await this.adapter.read(VAULT_STATE_PATH) !== transaction.previousRaw) throw new Error("Rollback verification failed.");
+            await this.removeExactJournal(journal);
+          } else if (!this.locked && current === transaction.previousRaw) {
+            await this.removeExactJournal(journal);
+          } else if (!this.locked) {
+            this.lock("Save outcome conflicts with the files on disk. All available versions were retained; reload to recover.");
+          }
+        } else if (journalPublished) {
+          this.lock("The recovery journal changed during a save. Reload before saving again.");
+        }
+      } catch (recoveryError) {
+        this.lock(`A save was interrupted and automatic recovery could not finish: ${errorText(recoveryError)}. Reload to recover from the retained journal and backup.`);
+      }
+      if (error instanceof VaultStorageError) throw error;
+      throw new VaultStorageError(`The deck was not saved: ${errorText(error)}`, "io");
+    }
+  }
+  async requireJournal(expected) {
+    if (await this.readOptional(VAULT_TRANSACTION_PATH) !== expected) this.conflict("The recovery journal changed during a save. All available files were retained.");
+  }
+  async removeExactJournal(expected) {
+    await this.requireJournal(expected);
+    await this.adapter.remove(VAULT_TRANSACTION_PATH);
+  }
+  async cleanupCommittedJournal(journal) {
+    try {
+      await this.removeExactJournal(journal);
+    } catch (error) {
+      if (await this.adapter.exists(VAULT_TRANSACTION_PATH)) this.lock(`The deck was saved, but recovery-journal cleanup failed: ${errorText(error)}. Reload before the next save.`);
+    }
+  }
+  async recover() {
+    const journal = await this.adapter.read(VAULT_TRANSACTION_PATH);
+    let transaction;
+    try {
+      const parsed = JSON.parse(journal);
+      if (!parsed || typeof parsed !== "object") throw new Error("Not an object.");
+      const t = parsed;
+      if (t.owner !== "passage-practice" || t.version !== 1 || typeof t.id !== "string" || !/^[a-zA-Z0-9-]{1,100}$/.test(t.id) || typeof t.previousRaw !== "string" || typeof t.nextRaw !== "string" || t.previousRaw === t.nextRaw) throw new Error("Unexpected recovery-journal format.");
+      this.decode(t.previousRaw);
+      this.decode(t.nextRaw);
+      transaction = t;
+    } catch (error) {
+      throw new Error(`Invalid recovery journal; no deck files were replaced: ${errorText(error)}`);
+    }
+    const current = await this.readOptional(VAULT_STATE_PATH);
+    const previous = await this.readOptional(backupPath(transaction.id));
+    if (current === transaction.nextRaw) {
+      if (previous !== transaction.previousRaw) throw new Error("The committed save has a missing or conflicting previous backup. All files were retained.");
+      this.accept(current);
+      await this.removeExactJournal(journal);
+    } else if (current === transaction.previousRaw) {
+      this.accept(current);
+      await this.removeExactJournal(journal);
+    } else if (current === null && previous === transaction.previousRaw) {
+      await this.requireJournal(journal);
+      if (await this.adapter.exists(VAULT_STATE_PATH)) throw new Error("A concurrent writer appeared during recovery.");
+      await this.adapter.rename(backupPath(transaction.id), VAULT_STATE_PATH);
+      if (await this.adapter.read(VAULT_STATE_PATH) !== transaction.previousRaw) throw new Error("Recovery verification failed.");
+      this.accept(transaction.previousRaw);
+      await this.removeExactJournal(journal);
+    } else {
+      throw new Error("Interrupted save conflicts with the current deck or its backup. No file was replaced; inspect the retained files before reloading.");
+    }
+  }
+};
+
+// src/spaced-repetition.ts
+var SR_VERSION = "sm2-osr-v1";
+var SR_MAX_INTERVAL = 36525;
+var SR_PARAMETERS = { baseEase: 250, hardMultiplier: 0.5, easyBonus: 1.3, maximumInterval: 36525, loadBalance: true };
+function emptySR(now, reviews = 0, lapses = 0) {
+  return { algorithm: "SM-2-OSR", version: SR_VERSION, parameters: { ...SR_PARAMETERS }, card: { interval: 1, ease: 250, due: now }, logs: [], baseline: { at: now, reviews, lapses } };
+}
+function srDelay(memory2, now) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.floor((today.getTime() - memory2.due) / 864e5));
+}
+function scheduleSR(memory2, rating, now, histogram = {}, delayDays = srDelay(memory2, now)) {
+  let interval = Math.max(1, memory2.interval), ease = memory2.ease;
+  const delay = delayDays;
+  if (rating === "again") {
+    ease = Math.max(130, ease - 20);
+    interval = 0;
+  } else if (rating === "hard") {
+    ease = Math.max(130, ease - 20);
+    interval = Math.max(1, (interval + delay / 4) * 0.5);
+  } else if (rating === "good") interval = (interval + delay / 2) * ease / 100;
+  else if (rating === "easy") {
+    ease += 20;
+    interval = (interval + delay) * ease / 100 * 1.3;
+  } else throw new Error("Unknown SM-2-OSR rating");
+  interval = Math.round(interval);
+  if (interval > 7 && Object.hasOwn(histogram, String(interval))) {
+    const fuzz = interval <= 21 ? 1 : interval <= 180 ? Math.min(3, Math.floor(interval * 0.05)) : Math.min(7, Math.floor(interval * 0.025));
+    const original = interval;
+    let count = histogram[String(interval)], found = false;
+    for (let offset = 1; offset <= fuzz && !found; offset++) for (const candidate of [original - offset, original + offset]) {
+      if (!Object.hasOwn(histogram, String(candidate))) {
+        interval = candidate;
+        found = true;
+        break;
+      }
+      if (histogram[String(candidate)] < count) {
+        interval = candidate;
+        count = histogram[String(candidate)];
+      }
+    }
+  }
+  interval = Math.round(Math.min(interval, SR_MAX_INTERVAL) * 10) / 10;
+  const due = new Date(now);
+  due.setHours(0, 0, 0, 0);
+  due.setDate(due.getDate() + Math.round(interval));
+  return { interval, ease, due: due.getTime() };
+}
+
+// node_modules/ts-fsrs/dist/index.mjs
+var FSRSError = class _FSRSError extends Error {
+  constructor(message = "FSRS Error") {
+    var _a2;
+    super(message);
+    this.name = "FSRSError";
+    (_a2 = Error.captureStackTrace) == null ? void 0 : _a2.call(Error, this, _FSRSError);
+  }
+};
+var FSRSValidationError = class _FSRSValidationError extends FSRSError {
+  constructor(message) {
+    var _a2;
+    super(message);
+    this.name = "FSRSValidationError";
+    (_a2 = Error.captureStackTrace) == null ? void 0 : _a2.call(Error, this, _FSRSValidationError);
+  }
+};
+var State = /* @__PURE__ */ ((State2) => {
+  State2[State2["New"] = 0] = "New";
+  State2[State2["Learning"] = 1] = "Learning";
+  State2[State2["Review"] = 2] = "Review";
+  State2[State2["Relearning"] = 3] = "Relearning";
+  return State2;
+})(State || {});
+var Rating = /* @__PURE__ */ ((Rating22) => {
+  Rating22[Rating22["Manual"] = 0] = "Manual";
+  Rating22[Rating22["Again"] = 1] = "Again";
+  Rating22[Rating22["Hard"] = 2] = "Hard";
+  Rating22[Rating22["Good"] = 3] = "Good";
+  Rating22[Rating22["Easy"] = 4] = "Easy";
+  return Rating22;
+})(Rating || {});
+var TypeConvert = class _TypeConvert {
+  static card(card) {
+    return {
+      ...card,
+      state: _TypeConvert.state(card.state),
+      due: _TypeConvert.time(card.due),
+      last_review: card.last_review ? _TypeConvert.time(card.last_review) : void 0
+    };
+  }
+  static rating(value) {
+    if (typeof value === "string") {
+      const firstLetter = value.charAt(0).toUpperCase();
+      const restOfString = value.slice(1).toLowerCase();
+      const ret = Rating[`${firstLetter}${restOfString}`];
+      if (ret === void 0) {
+        throw new FSRSValidationError(`Invalid rating:[${value}]`);
+      }
+      return ret;
+    } else if (typeof value === "number") {
+      return value;
+    }
+    throw new FSRSValidationError(`Invalid rating:[${value}]`);
+  }
+  static state(value) {
+    if (typeof value === "string") {
+      const firstLetter = value.charAt(0).toUpperCase();
+      const restOfString = value.slice(1).toLowerCase();
+      const ret = State[`${firstLetter}${restOfString}`];
+      if (ret === void 0) {
+        throw new FSRSValidationError(`Invalid state:[${value}]`);
+      }
+      return ret;
+    } else if (typeof value === "number") {
+      return value;
+    }
+    throw new FSRSValidationError(`Invalid state:[${value}]`);
+  }
+  static time(value) {
+    if (value instanceof Date) {
+      return value;
+    }
+    const date3 = new Date(value);
+    if (typeof value === "object" && value !== null && !Number.isNaN(Date.parse(value) || +date3)) {
+      return date3;
+    } else if (typeof value === "string") {
+      const timestamp2 = Date.parse(value);
+      if (!Number.isNaN(timestamp2)) {
+        return new Date(timestamp2);
+      } else {
+        throw new FSRSValidationError(`Invalid date:[${value}]`);
+      }
+    } else if (typeof value === "number") {
+      return new Date(value);
+    }
+    throw new FSRSValidationError(`Invalid date:[${value}]`);
+  }
+  static review_log(log) {
+    return {
+      ...log,
+      due: _TypeConvert.time(log.due),
+      rating: _TypeConvert.rating(log.rating),
+      state: _TypeConvert.state(log.state),
+      review: _TypeConvert.time(log.review)
+    };
+  }
+};
+function date_scheduler(now, t, isDay) {
+  return new Date(
+    isDay ? TypeConvert.time(now).getTime() + t * 24 * 60 * 60 * 1e3 : TypeConvert.time(now).getTime() + t * 60 * 1e3
+  );
+}
+function date_diff(now, pre, unit) {
+  if (!now || !pre) {
+    throw new FSRSValidationError("Invalid date");
+  }
+  const diff = TypeConvert.time(now).getTime() - TypeConvert.time(pre).getTime();
+  let r = 0;
+  switch (unit) {
+    case "days":
+      r = Math.floor(diff / (24 * 60 * 60 * 1e3));
+      break;
+    case "minutes":
+      r = Math.floor(diff / (60 * 1e3));
+      break;
+  }
+  return r;
+}
+var Grades = Object.freeze([
+  Rating.Again,
+  Rating.Hard,
+  Rating.Good,
+  Rating.Easy
+]);
+var FUZZ_RANGES = [
+  {
+    start: 2.5,
+    end: 7,
+    factor: 0.15
+  },
+  {
+    start: 7,
+    end: 20,
+    factor: 0.1
+  },
+  {
+    start: 20,
+    end: Infinity,
+    factor: 0.05
+  }
+];
+function get_fuzz_range(interval, elapsed_days, maximum_interval) {
+  let delta = 1;
+  for (const range of FUZZ_RANGES) {
+    delta += range.factor * Math.max(Math.min(interval, range.end) - range.start, 0);
+  }
+  interval = Math.min(interval, maximum_interval);
+  let min_ivl = Math.max(2, Math.round(interval - delta));
+  const max_ivl = Math.min(Math.round(interval + delta), maximum_interval);
+  if (interval > elapsed_days) {
+    min_ivl = Math.max(min_ivl, elapsed_days + 1);
+  }
+  min_ivl = Math.min(min_ivl, max_ivl);
+  return { min_ivl, max_ivl };
+}
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+function roundTo(num, decimals) {
+  const factor = 10 ** decimals;
+  return Math.round(num * factor) / factor;
+}
+function dateDiffInDays(last, cur) {
+  const utc1 = Date.UTC(
+    last.getUTCFullYear(),
+    last.getUTCMonth(),
+    last.getUTCDate()
+  );
+  const utc2 = Date.UTC(
+    cur.getUTCFullYear(),
+    cur.getUTCMonth(),
+    cur.getUTCDate()
+  );
+  return Math.floor(
+    (utc2 - utc1) / 864e5
+    /** 1000 * 60 * 60 * 24*/
+  );
+}
+var ConvertStepUnitToMinutes = (step) => {
+  const unit = step.slice(-1);
+  const value = parseInt(step.slice(0, -1), 10);
+  if (Number.isNaN(value) || !Number.isFinite(value) || value < 0) {
+    throw new FSRSValidationError(`Invalid step value: ${step}`);
+  }
+  switch (unit) {
+    case "m":
+      return value;
+    case "h":
+      return value * 60;
+    case "d":
+      return value * 1440;
+    default:
+      throw new FSRSValidationError(
+        `Invalid step unit: ${step}, expected m/h/d`
+      );
+  }
+};
+var BasicLearningStepsStrategy = (params, state, cur_step) => {
+  const learning_steps = state === State.Relearning || state === State.Review ? params.relearning_steps : params.learning_steps;
+  const steps_length = learning_steps.length;
+  if (steps_length === 0 || cur_step >= steps_length) return {};
+  const firstStep = learning_steps[0];
+  const toMinutes = ConvertStepUnitToMinutes;
+  const getAgainInterval = () => {
+    return toMinutes(firstStep);
+  };
+  const getHardInterval = () => {
+    if (steps_length === 1) return Math.round(toMinutes(firstStep) * 1.5);
+    const nextStep = learning_steps[1];
+    return Math.round((toMinutes(firstStep) + toMinutes(nextStep)) / 2);
+  };
+  const getStepInfo = (index) => {
+    if (index < 0 || index >= steps_length) {
+      return null;
+    } else {
+      return learning_steps[index];
+    }
+  };
+  const getGoodMinutes = (step) => {
+    return toMinutes(step);
+  };
+  const result = {};
+  const step_info = getStepInfo(Math.max(0, cur_step));
+  if (state === State.Review) {
+    result[Rating.Again] = {
+      scheduled_minutes: toMinutes(step_info),
+      next_step: 0
+    };
+    return result;
+  } else {
+    result[Rating.Again] = {
+      scheduled_minutes: getAgainInterval(),
+      next_step: 0
+    };
+    result[Rating.Hard] = {
+      scheduled_minutes: getHardInterval(),
+      next_step: cur_step
+    };
+    const next_info = getStepInfo(cur_step + 1);
+    if (next_info) {
+      const nextMin = getGoodMinutes(next_info);
+      if (nextMin) {
+        result[Rating.Good] = {
+          scheduled_minutes: Math.round(nextMin),
+          next_step: cur_step + 1
+        };
+      }
+    }
+  }
+  return result;
+};
+function DefaultInitSeedStrategy() {
+  const time = this.review_time.getTime();
+  const reps = this.current.reps;
+  const mul = this.current.difficulty * this.current.stability;
+  return `${time}_${reps}_${mul}`;
+}
+var StrategyMode = /* @__PURE__ */ ((StrategyMode2) => {
+  StrategyMode2["SCHEDULER"] = "Scheduler";
+  StrategyMode2["LEARNING_STEPS"] = "LearningSteps";
+  StrategyMode2["SEED"] = "Seed";
+  return StrategyMode2;
+})(StrategyMode || {});
+var AbstractScheduler = class {
+  // init
+  constructor(card, now, algorithm, strategies) {
+    __publicField(this, "last");
+    __publicField(this, "current");
+    __publicField(this, "review_time");
+    __publicField(this, "next", /* @__PURE__ */ new Map());
+    __publicField(this, "algorithm");
+    __publicField(this, "strategies");
+    __publicField(this, "elapsed_days", 0);
+    this.algorithm = algorithm;
+    this.last = TypeConvert.card(card);
+    this.current = TypeConvert.card(card);
+    this.review_time = TypeConvert.time(now);
+    this.strategies = strategies;
+    this.init();
+  }
+  checkGrade(grade) {
+    if (!Number.isFinite(grade) || grade < 1 || grade > 4) {
+      throw new FSRSValidationError(`Invalid grade "${grade}",expected 1-4`);
+    }
+  }
+  init() {
+    const { state, last_review } = this.current;
+    let interval = 0;
+    if (state !== State.New && last_review) {
+      interval = dateDiffInDays(last_review, this.review_time);
+    }
+    this.current.last_review = this.review_time;
+    this.elapsed_days = interval;
+    this.current.elapsed_days = interval;
+    this.current.reps += 1;
+    let seed_strategy = DefaultInitSeedStrategy;
+    if (this.strategies) {
+      const custom_strategy = this.strategies.get(StrategyMode.SEED);
+      if (custom_strategy) {
+        seed_strategy = custom_strategy;
+      }
+    }
+    this.algorithm.seed = seed_strategy.call(this);
+  }
+  preview() {
+    return {
+      [Rating.Again]: this.review(Rating.Again),
+      [Rating.Hard]: this.review(Rating.Hard),
+      [Rating.Good]: this.review(Rating.Good),
+      [Rating.Easy]: this.review(Rating.Easy),
+      [Symbol.iterator]: this.previewIterator.bind(this)
+    };
+  }
+  *previewIterator() {
+    for (const grade of Grades) {
+      yield this.review(grade);
+    }
+  }
+  review(grade) {
+    const { state } = this.last;
+    let item;
+    this.checkGrade(grade);
+    switch (state) {
+      case State.New:
+        item = this.newState(grade);
+        break;
+      case State.Learning:
+      case State.Relearning:
+        item = this.learningState(grade);
+        break;
+      case State.Review:
+        item = this.reviewState(grade);
+        break;
+    }
+    return item;
+  }
+  buildLog(rating) {
+    const { last_review, due, elapsed_days } = this.last;
+    return {
+      rating,
+      state: this.current.state,
+      due: last_review || due,
+      stability: this.current.stability,
+      difficulty: this.current.difficulty,
+      elapsed_days: this.elapsed_days,
+      last_elapsed_days: elapsed_days,
+      scheduled_days: this.current.scheduled_days,
+      learning_steps: this.current.learning_steps,
+      review: this.review_time
+    };
+  }
+};
+var Alea = class {
+  constructor(seed) {
+    __publicField(this, "c");
+    __publicField(this, "s0");
+    __publicField(this, "s1");
+    __publicField(this, "s2");
+    const mash = Mash();
+    this.c = 1;
+    this.s0 = mash(" ");
+    this.s1 = mash(" ");
+    this.s2 = mash(" ");
+    if (seed == null) seed = Date.now();
+    this.s0 -= mash(seed);
+    if (this.s0 < 0) this.s0 += 1;
+    this.s1 -= mash(seed);
+    if (this.s1 < 0) this.s1 += 1;
+    this.s2 -= mash(seed);
+    if (this.s2 < 0) this.s2 += 1;
+  }
+  next() {
+    const t = 2091639 * this.s0 + this.c * 23283064365386963e-26;
+    this.s0 = this.s1;
+    this.s1 = this.s2;
+    this.c = t | 0;
+    this.s2 = t - this.c;
+    return this.s2;
+  }
+  set state(state) {
+    this.c = state.c;
+    this.s0 = state.s0;
+    this.s1 = state.s1;
+    this.s2 = state.s2;
+  }
+  get state() {
+    return {
+      c: this.c,
+      s0: this.s0,
+      s1: this.s1,
+      s2: this.s2
+    };
+  }
+};
+function Mash() {
+  let n = 4022871197;
+  return function mash(data) {
+    data = String(data);
+    for (let i = 0; i < data.length; i++) {
+      n += data.charCodeAt(i);
+      let h = 0.02519603282416938 * n;
+      n = h >>> 0;
+      h -= n;
+      h *= n;
+      n = h >>> 0;
+      h -= n;
+      n += h * 4294967296;
+    }
+    return (n >>> 0) * 23283064365386963e-26;
+  };
+}
+function alea(seed) {
+  const xg = new Alea(seed);
+  const prng = () => xg.next();
+  prng.int32 = () => xg.next() * 4294967296 | 0;
+  prng.double = () => prng() + (prng() * 2097152 | 0) * 11102230246251565e-32;
+  prng.state = () => xg.state;
+  prng.importState = (state) => {
+    xg.state = state;
+    return prng;
+  };
+  return prng;
+}
+var version = "5.4.2";
+var default_request_retention = 0.9;
+var default_maximum_interval = 36500;
+var default_enable_fuzz = false;
+var default_enable_short_term = true;
+var default_learning_steps = Object.freeze([
+  "1m",
+  "10m"
+]);
+var default_relearning_steps = Object.freeze([
+  "10m"
+]);
+var FSRSVersion = `v${version} using FSRS-6.0`;
+var S_MIN = 1e-3;
+var S_MAX = 36500;
+var INIT_S_MAX = 100;
+var FSRS5_DEFAULT_DECAY = 0.5;
+var FSRS6_DEFAULT_DECAY = 0.1542;
+var default_w = Object.freeze([
+  0.212,
+  1.2931,
+  2.3065,
+  8.2956,
+  6.4133,
+  0.8334,
+  3.0194,
+  1e-3,
+  1.8722,
+  0.1666,
+  0.796,
+  1.4835,
+  0.0614,
+  0.2629,
+  1.6483,
+  0.6014,
+  1.8729,
+  0.5425,
+  0.0912,
+  0.0658,
+  FSRS6_DEFAULT_DECAY
+]);
+var W17_W18_Ceiling = 2;
+var CLAMP_PARAMETERS = (w17_w18_ceiling, enable_short_term = default_enable_short_term) => [
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [S_MIN, INIT_S_MAX],
+  [1, 10],
+  [1e-3, 4],
+  [1e-3, 4],
+  [1e-3, 0.75],
+  [0, 4.5],
+  [0, 0.8],
+  [1e-3, 3.5],
+  [1e-3, 5],
+  [1e-3, 0.25],
+  [1e-3, 0.9],
+  [0, 4],
+  [0, 1],
+  [1, 6],
+  [0, w17_w18_ceiling],
+  [0, w17_w18_ceiling],
+  [
+    enable_short_term ? 0.01 : 0,
+    0.8
+  ],
+  [0.1, 0.8]
+];
+var clipParameters = (parameters, numRelearningSteps, enableShortTerm = default_enable_short_term) => {
+  const clip = CLAMP_PARAMETERS(W17_W18_Ceiling, enableShortTerm).slice(
+    0,
+    parameters.length
+  );
+  if (Math.max(0, numRelearningSteps) > 1) {
+    const w11 = clamp(parameters[11] || 0, clip[11][0], clip[11][1]);
+    const w13 = clamp(parameters[13] || 0, clip[13][0], clip[13][1]);
+    const w14 = clamp(parameters[14] || 0, clip[14][0], clip[14][1]);
+    const value = -(Math.log(w11) + Math.log(Math.pow(2, w13) - 1) + w14 * 0.3) / numRelearningSteps;
+    const w17_w18_ceiling = clamp(
+      roundTo(Math.sqrt(Math.max(value, 0)), 8),
+      0.01,
+      W17_W18_Ceiling
+    );
+    if (clip[17]) clip[17] = [clip[17][0], w17_w18_ceiling];
+    if (clip[18]) clip[18] = [clip[18][0], w17_w18_ceiling];
+  }
+  return clip.map(
+    ([min, max], index) => clamp(parameters[index] || 0, min, max)
+  );
+};
+var migrateParameters = (parameters, numRelearningSteps = 0, enableShortTerm = default_enable_short_term) => {
+  if (parameters === void 0) {
+    return [...default_w];
+  }
+  switch (parameters.length) {
+    case 21:
+      return clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      );
+    case 19:
+      console.debug("[FSRS-6]auto fill w from 19 to 21 length");
+      return clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      ).concat([0, FSRS5_DEFAULT_DECAY]);
+    case 17: {
+      const w = clipParameters(
+        Array.from(parameters),
+        numRelearningSteps,
+        enableShortTerm
+      );
+      w[4] = +(w[5] * 2 + w[4]).toFixed(8);
+      w[5] = +(Math.log(w[5] * 3 + 1) / 3).toFixed(8);
+      w[6] = +(w[6] + 0.5).toFixed(8);
+      console.debug("[FSRS-6]auto fill w from 17 to 21 length");
+      return w.concat([0, 0, 0, FSRS5_DEFAULT_DECAY]);
+    }
+    default:
+      console.warn("[FSRS]Invalid parameters length, using default parameters");
+      return [...default_w];
+  }
+};
+var generatorParameters = (props) => {
+  var _a2, _b;
+  const learning_steps = Array.isArray(props == null ? void 0 : props.learning_steps) ? props.learning_steps : default_learning_steps;
+  const relearning_steps = Array.isArray(props == null ? void 0 : props.relearning_steps) ? props.relearning_steps : default_relearning_steps;
+  const enable_short_term = (_a2 = props == null ? void 0 : props.enable_short_term) != null ? _a2 : default_enable_short_term;
+  const w = migrateParameters(
+    props == null ? void 0 : props.w,
+    relearning_steps.length,
+    enable_short_term
+  );
+  return {
+    request_retention: (props == null ? void 0 : props.request_retention) || default_request_retention,
+    maximum_interval: (props == null ? void 0 : props.maximum_interval) || default_maximum_interval,
+    w,
+    enable_fuzz: (_b = props == null ? void 0 : props.enable_fuzz) != null ? _b : default_enable_fuzz,
+    enable_short_term,
+    learning_steps,
+    relearning_steps
+  };
+};
+function createEmptyCard(now, afterHandler) {
+  const emptyCard = {
+    due: now ? TypeConvert.time(now) : /* @__PURE__ */ new Date(),
+    stability: 0,
+    difficulty: 0,
+    elapsed_days: 0,
+    scheduled_days: 0,
+    reps: 0,
+    lapses: 0,
+    learning_steps: 0,
+    state: State.New,
+    last_review: void 0
+  };
+  if (afterHandler && typeof afterHandler === "function") {
+    return afterHandler(emptyCard);
+  } else {
+    return emptyCard;
+  }
+}
+var computeDecayFactor = (decayOrParams) => {
+  const decay = typeof decayOrParams === "number" ? -decayOrParams : -decayOrParams[20];
+  const factor = Math.exp(Math.pow(decay, -1) * Math.log(0.9)) - 1;
+  return { decay, factor: roundTo(factor, 8) };
+};
+function forgetting_curve(decayOrParams, elapsed_days, stability) {
+  const { decay, factor } = computeDecayFactor(decayOrParams);
+  return roundTo(Math.pow(1 + factor * elapsed_days / stability, decay), 8);
+}
+var FSRSAlgorithm = class {
+  constructor(params) {
+    __publicField(this, "param");
+    __publicField(this, "intervalModifier");
+    __publicField(this, "_seed");
+    __publicField(this, "prepare_parameters", (params) => {
+      const generated = generatorParameters(params);
+      generated.w = clipParameters(
+        Array.from(generated.w),
+        generated.relearning_steps.length,
+        generated.enable_short_term
+      );
+      return generated;
+    });
+    /**
+     * The formula used is :
+     * $$R(t,S) = (1 + \text{FACTOR} \times \frac{t}{9 \cdot S})^{\text{DECAY}}$$
+     * @param {number} elapsed_days t days since the last review
+     * @param {number} stability Stability (interval when R=90%)
+     * @return {number} r Retrievability (probability of recall)
+     */
+    __publicField(this, "forgetting_curve");
+    this.param = new Proxy(
+      this.prepare_parameters(params),
+      this.params_handler_proxy()
+    );
+    this.intervalModifier = this.calculate_interval_modifier(
+      this.param.request_retention
+    );
+    this.forgetting_curve = forgetting_curve.bind(this, this.param.w);
+  }
+  get interval_modifier() {
+    return this.intervalModifier;
+  }
+  set seed(seed) {
+    this._seed = seed;
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm#fsrs-5
+   *
+   * The formula used is: $$I(r,s) = (r^{\frac{1}{DECAY}} - 1) / FACTOR \times s$$
+   * @param request_retention 0<request_retention<=1,Requested retention rate
+   * @throws {Error} Requested retention rate should be in the range (0,1]
+   */
+  calculate_interval_modifier(request_retention) {
+    if (request_retention <= 0 || request_retention > 1) {
+      throw new FSRSValidationError(
+        "Requested retention rate should be in the range (0,1]"
+      );
+    }
+    const { decay, factor } = computeDecayFactor(this.param.w);
+    return roundTo((Math.pow(request_retention, 1 / decay) - 1) / factor, 8);
+  }
+  /**
+   * Get the parameters of the algorithm.
+   */
+  get parameters() {
+    return this.param;
+  }
+  /**
+   * Set the parameters of the algorithm.
+   * @param params Partial<FSRSParameters>
+   */
+  set parameters(params) {
+    this.update_parameters(params);
+  }
+  params_handler_proxy() {
+    const _this = this;
+    return {
+      set: function(target, prop, value) {
+        if (prop === "request_retention" && Number.isFinite(value)) {
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(value)
+          );
+        } else if (prop === "w") {
+          value = migrateParameters(
+            value,
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          value = clipParameters(
+            Array.from(value),
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          _this.forgetting_curve = forgetting_curve.bind(this, value);
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(target.request_retention)
+          );
+        }
+        Reflect.set(target, prop, value);
+        return true;
+      }
+    };
+  }
+  update_parameters(params) {
+    const _params = this.prepare_parameters(params);
+    for (const key in _params) {
+      const paramKey = key;
+      this.param[paramKey] = _params[paramKey];
+    }
+  }
+  /**
+     * The formula used is :
+     * $$ S_0(G) = w_{G-1}$$
+     * $$S_0 = \max \lbrace S_0,0.1\rbrace $$
+  
+     * @param g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+     * @return Stability (interval when R=90%)
+     */
+  init_stability(g) {
+    return Math.max(this.param.w[g - 1], 0.1);
+  }
+  /**
+   * The formula used is :
+   * $$D_0(G) = w_4 - e^{(G-1) \cdot w_5} + 1 $$
+   * $$D_0 = \min \lbrace \max \lbrace D_0(G),1 \rbrace,10 \rbrace$$
+   * where the $$D_0(1)=w_4$$ when the first rating is good.
+   *
+   * @param {Grade} g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+   * @return {number} Difficulty $$D \in [1,10]$$
+   */
+  init_difficulty(g) {
+    const w = this.param.w;
+    const d = w[4] - Math.exp((g - 1) * w[5]) + 1;
+    return roundTo(d, 8);
+  }
+  /**
+   * If fuzzing is disabled or ivl is less than 2.5, it returns the original interval.
+   * @param {number} ivl - The interval to be fuzzed.
+   * @param {number} elapsed_days t days since the last review
+   * @return {number} - The fuzzed interval.
+   **/
+  apply_fuzz(ivl, elapsed_days) {
+    if (!this.param.enable_fuzz || ivl < 2.5) return Math.round(ivl);
+    const generator = alea(this._seed);
+    const fuzz_factor = generator();
+    const { min_ivl, max_ivl } = get_fuzz_range(
+      ivl,
+      elapsed_days,
+      this.param.maximum_interval
+    );
+    return Math.floor(fuzz_factor * (max_ivl - min_ivl + 1) + min_ivl);
+  }
+  /**
+   *   @see The formula used is : {@link FSRSAlgorithm.calculate_interval_modifier}
+   *   @param {number} s - Stability (interval when R=90%)
+   *   @param {number} elapsed_days t days since the last review
+   */
+  next_interval(s, elapsed_days) {
+    const newInterval = Math.min(
+      Math.max(1, Math.round(s * this.intervalModifier)),
+      this.param.maximum_interval
+    );
+    return this.apply_fuzz(newInterval, elapsed_days);
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/fsrs4anki/issues/697
+   */
+  linear_damping(delta_d, old_d) {
+    return roundTo(delta_d * (10 - old_d) / 9, 8);
+  }
+  /**
+   * The formula used is :
+   * $$\text{delta}_d = -w_6 \cdot (g - 3)$$
+   * $$\text{next}_d = D + \text{linear damping}(\text{delta}_d , D)$$
+   * $$D^\prime(D,R) = w_7 \cdot D_0(4) +(1 - w_7) \cdot \text{next}_d$$
+   * @param {number} d Difficulty $$D \in [1,10]$$
+   * @param {Grade} g Grade (rating at Anki) [1.again,2.hard,3.good,4.easy]
+   * @return {number} $$\text{next}_D$$
+   */
+  next_difficulty(d, g) {
+    const delta_d = -this.param.w[6] * (g - 3);
+    const next_d = d + this.linear_damping(delta_d, d);
+    return clamp(
+      this.mean_reversion(this.init_difficulty(Rating.Easy), next_d),
+      1,
+      10
+    );
+  }
+  /**
+   * The formula used is :
+   * $$w_7 \cdot \text{init} +(1 - w_7) \cdot \text{current}$$
+   * @param {number} init $$w_2 : D_0(3) = w_2 + (R-2) \cdot w_3= w_2$$
+   * @param {number} current $$D - w_6 \cdot (R - 2)$$
+   * @return {number} difficulty
+   */
+  mean_reversion(init, current) {
+    const w = this.param.w;
+    return roundTo(w[7] * init + (1 - w[7]) * current, 8);
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_r(D,S,R,G) = S\cdot(e^{w_8}\cdot (11-D)\cdot S^{-w_9}\cdot(e^{w_{10}\cdot(1-R)}-1)\cdot w_{15}(\text{if} G=2) \cdot w_{16}(\text{if} G=4)+1)$$
+   * @param {number} d Difficulty D \in [1,10]
+   * @param {number} s Stability (interval when R=90%)
+   * @param {number} r Retrievability (probability of recall)
+   * @param {Grade} g Grade (Rating[0.again,1.hard,2.good,3.easy])
+   * @return {number} S^\prime_r new stability after recall
+   */
+  next_recall_stability(d, s, r, g) {
+    const w = this.param.w;
+    const hard_penalty = Rating.Hard === g ? w[15] : 1;
+    const easy_bound = Rating.Easy === g ? w[16] : 1;
+    return roundTo(
+      clamp(
+        s * (1 + Math.exp(w[8]) * (11 - d) * Math.pow(s, -w[9]) * (Math.exp((1 - r) * w[10]) - 1) * hard_penalty * easy_bound),
+        S_MIN,
+        36500
+      ),
+      8
+    );
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_f(D,S,R) = w_{11}\cdot D^{-w_{12}}\cdot ((S+1)^{w_{13}}-1) \cdot e^{w_{14}\cdot(1-R)}$$
+   * enable_short_term = true : $$S^\prime_f \in \min \lbrace \max \lbrace S^\prime_f,0.01\rbrace, \frac{S}{e^{w_{17} \cdot w_{18}}} \rbrace$$
+   * enable_short_term = false : $$S^\prime_f \in \min \lbrace \max \lbrace S^\prime_f,0.01\rbrace, S \rbrace$$
+   * @param {number} d Difficulty D \in [1,10]
+   * @param {number} s Stability (interval when R=90%)
+   * @param {number} r Retrievability (probability of recall)
+   * @return {number} S^\prime_f new stability after forgetting
+   */
+  next_forget_stability(d, s, r) {
+    const w = this.param.w;
+    return roundTo(
+      clamp(
+        w[11] * Math.pow(d, -w[12]) * (Math.pow(s + 1, w[13]) - 1) * Math.exp((1 - r) * w[14]),
+        S_MIN,
+        36500
+      ),
+      8
+    );
+  }
+  /**
+   * The formula used is :
+   * $$S^\prime_s(S,G) = S \cdot e^{w_{17} \cdot (G-3+w_{18})}$$
+   * @param {number} s Stability (interval when R=90%)
+   * @param {Grade} g Grade (Rating[0.again,1.hard,2.good,3.easy])
+   */
+  next_short_term_stability(s, g) {
+    const w = this.param.w;
+    const sinc = Math.pow(s, -w[19]) * Math.exp(w[17] * (g - 3 + w[18]));
+    const maskedSinc = g >= Rating.Hard ? Math.max(sinc, 1) : sinc;
+    return roundTo(clamp(s * maskedSinc, S_MIN, 36500), 8);
+  }
+  /**
+   * Calculates the next state of memory based on the current state, time elapsed, and grade.
+   *
+   * @param memory_state - The current state of memory, which can be null.
+   * @param t - The time elapsed since the last review.
+   * @param {Rating} g Grade (Rating[0.Manual,1.Again,2.Hard,3.Good,4.Easy])
+   * @param r - Optional retrievability value. If not provided, it will be calculated.
+   * @returns The next state of memory with updated difficulty and stability.
+   */
+  next_state(memory_state, t, g, r) {
+    const { difficulty: d, stability: s } = memory_state != null ? memory_state : {
+      difficulty: 0,
+      stability: 0
+    };
+    if (t < 0) {
+      throw new FSRSValidationError(`Invalid delta_t "${t}"`);
+    }
+    if (g < 0 || g > 4) {
+      throw new FSRSValidationError(`Invalid grade "${g}"`);
+    }
+    if (d === 0 && s === 0) {
+      return {
+        difficulty: clamp(this.init_difficulty(g), 1, 10),
+        stability: this.init_stability(g)
+      };
+    }
+    if (g === 0) {
+      return {
+        difficulty: d,
+        stability: s
+      };
+    }
+    if (d < 1 || s < S_MIN) {
+      throw new FSRSValidationError(
+        `Invalid memory state { difficulty: ${d}, stability: ${s} }`
+      );
+    }
+    const w = this.param.w;
+    r = typeof r === "number" ? r : this.forgetting_curve(t, s);
+    let new_s;
+    if (t === 0 && this.param.enable_short_term) {
+      new_s = this.next_short_term_stability(s, g);
+    } else if (g === 1) {
+      const s_after_fail = this.next_forget_stability(d, s, r);
+      let [w_17, w_18] = [0, 0];
+      if (this.param.enable_short_term) {
+        w_17 = w[17];
+        w_18 = w[18];
+      }
+      const next_s_min = s / Math.exp(w_17 * w_18);
+      new_s = clamp(roundTo(next_s_min, 8), S_MIN, s_after_fail);
+    } else {
+      new_s = this.next_recall_stability(d, s, r, g);
+    }
+    const new_d = this.next_difficulty(d, g);
+    return { difficulty: new_d, stability: new_s };
+  }
+};
+var BasicScheduler = class extends AbstractScheduler {
+  constructor(card, now, algorithm, strategies) {
+    super(card, now, algorithm, strategies);
+    __publicField(this, "learningStepsStrategy");
+    let learningStepStrategy = BasicLearningStepsStrategy;
+    if (this.strategies) {
+      const custom_strategy = this.strategies.get(StrategyMode.LEARNING_STEPS);
+      if (custom_strategy) {
+        learningStepStrategy = custom_strategy;
+      }
+    }
+    this.learningStepsStrategy = learningStepStrategy;
+  }
+  getLearningInfo(card, grade) {
+    var _a2, _b, _c, _d;
+    const parameters = this.algorithm.parameters;
+    card.learning_steps = card.learning_steps || 0;
+    const steps_strategy = this.learningStepsStrategy(
+      parameters,
+      card.state,
+      card.learning_steps
+    );
+    const scheduled_minutes = Math.max(
+      0,
+      (_b = (_a2 = steps_strategy[grade]) == null ? void 0 : _a2.scheduled_minutes) != null ? _b : 0
+    );
+    const next_steps = Math.max(0, (_d = (_c = steps_strategy[grade]) == null ? void 0 : _c.next_step) != null ? _d : 0);
+    return {
+      scheduled_minutes,
+      next_steps
+    };
+  }
+  /**
+   * @description This function applies the learning steps based on the current card's state and grade.
+   */
+  applyLearningSteps(nextCard, grade, to_state) {
+    const { scheduled_minutes, next_steps } = this.getLearningInfo(
+      this.current,
+      grade
+    );
+    if (scheduled_minutes > 0 && scheduled_minutes < 1440) {
+      nextCard.learning_steps = next_steps;
+      nextCard.scheduled_days = 0;
+      nextCard.state = to_state;
+      nextCard.due = date_scheduler(
+        this.review_time,
+        Math.round(scheduled_minutes),
+        false
+        /** true:days false: minute */
+      );
+    } else {
+      nextCard.state = State.Review;
+      if (scheduled_minutes >= 1440) {
+        nextCard.learning_steps = next_steps;
+        nextCard.due = date_scheduler(
+          this.review_time,
+          Math.round(scheduled_minutes),
+          false
+          /** true:days false: minute */
+        );
+        nextCard.scheduled_days = Math.floor(scheduled_minutes / 1440);
+      } else {
+        nextCard.learning_steps = 0;
+        const interval = this.algorithm.next_interval(
+          nextCard.stability,
+          this.elapsed_days
+        );
+        nextCard.scheduled_days = interval;
+        nextCard.due = date_scheduler(this.review_time, interval, true);
+      }
+    }
+  }
+  newState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const next = this.next_ds(this.elapsed_days, grade);
+    this.applyLearningSteps(next, grade, State.Learning);
+    const item = {
+      card: next,
+      log: this.buildLog(grade)
+    };
+    this.next.set(grade, item);
+    return item;
+  }
+  learningState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const next = this.next_ds(this.elapsed_days, grade);
+    this.applyLearningSteps(
+      next,
+      grade,
+      this.last.state
+      /** Learning or Relearning */
+    );
+    const item = {
+      card: next,
+      log: this.buildLog(grade)
+    };
+    this.next.set(grade, item);
+    return item;
+  }
+  reviewState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const interval = this.elapsed_days;
+    const retrievability = this.algorithm.forgetting_curve(
+      interval,
+      this.current.stability
+    );
+    const next_again = this.next_ds(interval, Rating.Again, retrievability);
+    const next_hard = this.next_ds(interval, Rating.Hard, retrievability);
+    const next_good = this.next_ds(interval, Rating.Good, retrievability);
+    const next_easy = this.next_ds(interval, Rating.Easy, retrievability);
+    this.next_interval(next_hard, next_good, next_easy, interval);
+    this.next_state(next_hard, next_good, next_easy);
+    this.applyLearningSteps(next_again, Rating.Again, State.Relearning);
+    next_again.lapses += 1;
+    const item_again = {
+      card: next_again,
+      log: this.buildLog(Rating.Again)
+    };
+    const item_hard = {
+      card: next_hard,
+      log: super.buildLog(Rating.Hard)
+    };
+    const item_good = {
+      card: next_good,
+      log: super.buildLog(Rating.Good)
+    };
+    const item_easy = {
+      card: next_easy,
+      log: super.buildLog(Rating.Easy)
+    };
+    this.next.set(Rating.Again, item_again);
+    this.next.set(Rating.Hard, item_hard);
+    this.next.set(Rating.Good, item_good);
+    this.next.set(Rating.Easy, item_easy);
+    return this.next.get(grade);
+  }
+  /**
+   * Review next_ds
+   */
+  next_ds(t, g, r) {
+    const next_state = this.algorithm.next_state(
+      {
+        difficulty: this.current.difficulty,
+        stability: this.current.stability
+      },
+      t,
+      g,
+      r
+    );
+    const card = TypeConvert.card(this.current);
+    card.difficulty = next_state.difficulty;
+    card.stability = next_state.stability;
+    return card;
+  }
+  /**
+   * Review next_interval
+   */
+  next_interval(next_hard, next_good, next_easy, interval) {
+    let hard_interval, good_interval;
+    hard_interval = this.algorithm.next_interval(next_hard.stability, interval);
+    good_interval = this.algorithm.next_interval(next_good.stability, interval);
+    hard_interval = Math.min(hard_interval, good_interval);
+    good_interval = Math.max(good_interval, hard_interval + 1);
+    const easy_interval = Math.max(
+      this.algorithm.next_interval(next_easy.stability, interval),
+      good_interval + 1
+    );
+    next_hard.scheduled_days = hard_interval;
+    next_hard.due = date_scheduler(this.review_time, hard_interval, true);
+    next_good.scheduled_days = good_interval;
+    next_good.due = date_scheduler(this.review_time, good_interval, true);
+    next_easy.scheduled_days = easy_interval;
+    next_easy.due = date_scheduler(this.review_time, easy_interval, true);
+  }
+  /**
+   * Review next_state
+   */
+  next_state(next_hard, next_good, next_easy) {
+    next_hard.state = State.Review;
+    next_hard.learning_steps = 0;
+    next_good.state = State.Review;
+    next_good.learning_steps = 0;
+    next_easy.state = State.Review;
+    next_easy.learning_steps = 0;
+  }
+};
+var LongTermScheduler = class extends AbstractScheduler {
+  newState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    this.current.scheduled_days = 0;
+    this.current.elapsed_days = 0;
+    const first_interval = 0;
+    const next_again = this.next_ds(first_interval, Rating.Again);
+    const next_hard = this.next_ds(first_interval, Rating.Hard);
+    const next_good = this.next_ds(first_interval, Rating.Good);
+    const next_easy = this.next_ds(first_interval, Rating.Easy);
+    this.next_interval(
+      next_again,
+      next_hard,
+      next_good,
+      next_easy,
+      first_interval
+    );
+    this.next_state(next_again, next_hard, next_good, next_easy);
+    this.update_next(next_again, next_hard, next_good, next_easy);
+    return this.next.get(grade);
+  }
+  next_ds(t, g, r) {
+    const next_state = this.algorithm.next_state(
+      {
+        difficulty: this.current.difficulty,
+        stability: this.current.stability
+      },
+      t,
+      g,
+      r
+    );
+    const card = TypeConvert.card(this.current);
+    card.difficulty = next_state.difficulty;
+    card.stability = next_state.stability;
+    return card;
+  }
+  /**
+   * @see https://github.com/open-spaced-repetition/ts-fsrs/issues/98#issuecomment-2241923194
+   */
+  learningState(grade) {
+    return this.reviewState(grade);
+  }
+  reviewState(grade) {
+    const exist = this.next.get(grade);
+    if (exist) {
+      return exist;
+    }
+    const interval = this.elapsed_days;
+    const retrievability = this.algorithm.forgetting_curve(
+      interval,
+      this.current.stability
+    );
+    const next_again = this.next_ds(interval, Rating.Again, retrievability);
+    const next_hard = this.next_ds(interval, Rating.Hard, retrievability);
+    const next_good = this.next_ds(interval, Rating.Good, retrievability);
+    const next_easy = this.next_ds(interval, Rating.Easy, retrievability);
+    this.next_interval(next_again, next_hard, next_good, next_easy, interval);
+    this.next_state(next_again, next_hard, next_good, next_easy);
+    next_again.lapses += 1;
+    this.update_next(next_again, next_hard, next_good, next_easy);
+    return this.next.get(grade);
+  }
+  /**
+   * Review/New next_interval
+   */
+  next_interval(next_again, next_hard, next_good, next_easy, interval) {
+    let again_interval, hard_interval, good_interval, easy_interval;
+    again_interval = this.algorithm.next_interval(
+      next_again.stability,
+      interval
+    );
+    hard_interval = this.algorithm.next_interval(next_hard.stability, interval);
+    good_interval = this.algorithm.next_interval(next_good.stability, interval);
+    easy_interval = this.algorithm.next_interval(next_easy.stability, interval);
+    again_interval = Math.min(again_interval, hard_interval);
+    hard_interval = Math.max(hard_interval, again_interval + 1);
+    good_interval = Math.max(good_interval, hard_interval + 1);
+    easy_interval = Math.max(easy_interval, good_interval + 1);
+    next_again.scheduled_days = again_interval;
+    next_again.due = date_scheduler(this.review_time, again_interval, true);
+    next_hard.scheduled_days = hard_interval;
+    next_hard.due = date_scheduler(this.review_time, hard_interval, true);
+    next_good.scheduled_days = good_interval;
+    next_good.due = date_scheduler(this.review_time, good_interval, true);
+    next_easy.scheduled_days = easy_interval;
+    next_easy.due = date_scheduler(this.review_time, easy_interval, true);
+  }
+  /**
+   * Review/New next_state
+   */
+  next_state(next_again, next_hard, next_good, next_easy) {
+    next_again.state = State.Review;
+    next_again.learning_steps = 0;
+    next_hard.state = State.Review;
+    next_hard.learning_steps = 0;
+    next_good.state = State.Review;
+    next_good.learning_steps = 0;
+    next_easy.state = State.Review;
+    next_easy.learning_steps = 0;
+  }
+  update_next(next_again, next_hard, next_good, next_easy) {
+    const item_again = {
+      card: next_again,
+      log: this.buildLog(Rating.Again)
+    };
+    const item_hard = {
+      card: next_hard,
+      log: super.buildLog(Rating.Hard)
+    };
+    const item_good = {
+      card: next_good,
+      log: super.buildLog(Rating.Good)
+    };
+    const item_easy = {
+      card: next_easy,
+      log: super.buildLog(Rating.Easy)
+    };
+    this.next.set(Rating.Again, item_again);
+    this.next.set(Rating.Hard, item_hard);
+    this.next.set(Rating.Good, item_good);
+    this.next.set(Rating.Easy, item_easy);
+  }
+};
+var Reschedule = class {
+  /**
+   * Creates an instance of the `Reschedule` class.
+   * @param fsrs - An instance of the FSRS class used for scheduling.
+   */
+  constructor(fsrs2) {
+    __publicField(this, "fsrs");
+    this.fsrs = fsrs2;
+  }
+  /**
+   * Replays a review for a card and determines the next review date based on the given rating.
+   * @param card - The card being reviewed.
+   * @param reviewed - The date the card was reviewed.
+   * @param rating - The grade given to the card during the review.
+   * @returns A `RecordLogItem` containing the updated card and review log.
+   */
+  replay(card, reviewed, rating) {
+    return this.fsrs.next(card, reviewed, rating);
+  }
+  /**
+   * Processes a manual review for a card, allowing for custom state, stability, difficulty, and due date.
+   * @param card - The card being reviewed.
+   * @param state - The state of the card after the review.
+   * @param reviewed - The date the card was reviewed.
+   * @param elapsed_days - The number of days since the last review.
+   * @param stability - (Optional) The stability of the card.
+   * @param difficulty - (Optional) The difficulty of the card.
+   * @param due - (Optional) The due date for the next review.
+   * @returns A `RecordLogItem` containing the updated card and review log.
+   * @throws Will throw an error if the state or due date is not provided when required.
+   */
+  handleManualRating(card, state, reviewed, elapsed_days, stability, difficulty, due) {
+    if (typeof state === "undefined") {
+      throw new FSRSValidationError(
+        "reschedule: state is required for manual rating"
+      );
+    }
+    let log;
+    let next_card;
+    if (state === State.New) {
+      log = {
+        rating: Rating.Manual,
+        state,
+        due: due != null ? due : reviewed,
+        stability: card.stability,
+        difficulty: card.difficulty,
+        elapsed_days,
+        last_elapsed_days: card.elapsed_days,
+        scheduled_days: card.scheduled_days,
+        learning_steps: card.learning_steps,
+        review: reviewed
+      };
+      next_card = createEmptyCard(reviewed);
+      next_card.last_review = reviewed;
+    } else {
+      if (typeof due === "undefined") {
+        throw new FSRSValidationError(
+          "reschedule: due is required for manual rating"
+        );
+      }
+      const scheduled_days = date_diff(due, reviewed, "days");
+      log = {
+        rating: Rating.Manual,
+        state: card.state,
+        due: card.last_review || card.due,
+        stability: card.stability,
+        difficulty: card.difficulty,
+        elapsed_days,
+        last_elapsed_days: card.elapsed_days,
+        scheduled_days: card.scheduled_days,
+        learning_steps: card.learning_steps,
+        review: reviewed
+      };
+      next_card = {
+        ...card,
+        state,
+        due,
+        last_review: reviewed,
+        stability: stability || card.stability,
+        difficulty: difficulty || card.difficulty,
+        elapsed_days,
+        scheduled_days,
+        reps: card.reps + 1
+      };
+    }
+    return { card: next_card, log };
+  }
+  /**
+   * Reschedules a card based on its review history.
+   *
+   * @param current_card - The card to be rescheduled.
+   * @param reviews - An array of review history objects.
+   * @returns An array of record log items representing the rescheduling process.
+   */
+  reschedule(current_card, reviews) {
+    const collections = [];
+    let cur_card = createEmptyCard(current_card.due);
+    for (const review of reviews) {
+      let item;
+      review.review = TypeConvert.time(review.review);
+      if (review.rating === Rating.Manual) {
+        let interval = 0;
+        if (cur_card.state !== State.New && cur_card.last_review) {
+          interval = date_diff(review.review, cur_card.last_review, "days");
+        }
+        item = this.handleManualRating(
+          cur_card,
+          review.state,
+          review.review,
+          interval,
+          review.stability,
+          review.difficulty,
+          review.due ? TypeConvert.time(review.due) : void 0
+        );
+      } else {
+        item = this.replay(cur_card, review.review, review.rating);
+      }
+      collections.push(item);
+      cur_card = item.card;
+    }
+    return collections;
+  }
+  calculateManualRecord(current_card, now, record_log_item, update_memory) {
+    if (!record_log_item) {
+      return null;
+    }
+    const { card: reschedule_card, log } = record_log_item;
+    const cur_card = TypeConvert.card(current_card);
+    if (cur_card.due.getTime() === reschedule_card.due.getTime()) {
+      return null;
+    }
+    cur_card.scheduled_days = date_diff(
+      reschedule_card.due,
+      cur_card.due,
+      "days"
+    );
+    return this.handleManualRating(
+      cur_card,
+      reschedule_card.state,
+      TypeConvert.time(now),
+      log.elapsed_days,
+      update_memory ? reschedule_card.stability : void 0,
+      update_memory ? reschedule_card.difficulty : void 0,
+      reschedule_card.due
+    );
+  }
+};
+function applyAfterHandler(value, afterHandler) {
+  return typeof afterHandler === "function" ? afterHandler(value) : value;
+}
+var FSRS = class extends FSRSAlgorithm {
+  constructor(param) {
+    super(param);
+    __publicField(this, "strategyHandler", /* @__PURE__ */ new Map());
+    __publicField(this, "Scheduler");
+    const { enable_short_term } = this.parameters;
+    this.Scheduler = enable_short_term ? BasicScheduler : LongTermScheduler;
+  }
+  params_handler_proxy() {
+    const _this = this;
+    return {
+      set: function(target, prop, value) {
+        if (prop === "request_retention" && Number.isFinite(value)) {
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(value)
+          );
+        } else if (prop === "enable_short_term") {
+          _this.Scheduler = value === true ? BasicScheduler : LongTermScheduler;
+        } else if (prop === "w") {
+          value = migrateParameters(
+            value,
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          value = clipParameters(
+            Array.from(value),
+            target.relearning_steps.length,
+            target.enable_short_term
+          );
+          _this.forgetting_curve = forgetting_curve.bind(this, value);
+          _this.intervalModifier = _this.calculate_interval_modifier(
+            Number(target.request_retention)
+          );
+        }
+        Reflect.set(target, prop, value);
+        return true;
+      }
+    };
+  }
+  useStrategy(mode, handler) {
+    this.strategyHandler.set(mode, handler);
+    return this;
+  }
+  clearStrategy(mode) {
+    if (mode) {
+      this.strategyHandler.delete(mode);
+    } else {
+      this.strategyHandler.clear();
+    }
+    return this;
+  }
+  getScheduler(card, now) {
+    const schedulerStrategy = this.strategyHandler.get(
+      StrategyMode.SCHEDULER
+    );
+    const Scheduler = schedulerStrategy || this.Scheduler;
+    const instance = new Scheduler(card, now, this, this.strategyHandler);
+    return instance;
+  }
+  /**
+   * Display the collection of cards and logs for the four scenarios after scheduling the card at the current time.
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const card: Card = createEmptyCard(new Date());
+   * const f = fsrs();
+   * const recordLog = f.repeat(card, new Date());
+   * ```
+   * @example
+   * ```typescript
+   * interface RevLogUnchecked
+   *   extends Omit<ReviewLog, "due" | "review" | "state" | "rating"> {
+   *   cid: string;
+   *   due: Date | number;
+   *   state: StateType;
+   *   review: Date | number;
+   *   rating: RatingType;
+   * }
+   *
+   * interface RepeatRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked;
+   * }
+   *
+   * function repeatAfterHandler(recordLog: RecordLog) {
+   *     const record: { [key in Grade]: RepeatRecordLog } = {} as {
+   *       [key in Grade]: RepeatRecordLog;
+   *     };
+   *     for (const grade of Grades) {
+   *       record[grade] = {
+   *         card: {
+   *           ...(recordLog[grade].card as Card & { cid: string }),
+   *           due: recordLog[grade].card.due.getTime(),
+   *           state: State[recordLog[grade].card.state] as StateType,
+   *           last_review: recordLog[grade].card.last_review
+   *             ? recordLog[grade].card.last_review!.getTime()
+   *             : null,
+   *         },
+   *         log: {
+   *           ...recordLog[grade].log,
+   *           cid: (recordLog[grade].card as Card & { cid: string }).cid,
+   *           due: recordLog[grade].log.due.getTime(),
+   *           review: recordLog[grade].log.review.getTime(),
+   *           state: State[recordLog[grade].log.state] as StateType,
+   *           rating: Rating[recordLog[grade].log.rating] as RatingType,
+   *         },
+   *       };
+   *     }
+   *     return record;
+   * }
+   * const card: Card = createEmptyCard(new Date(), cardAfterHandler); //see method:  createEmptyCard
+   * const f = fsrs();
+   * const recordLog = f.repeat(card, new Date(), repeatAfterHandler);
+   * ```
+   */
+  repeat(card, now, afterHandler) {
+    const instance = this.getScheduler(card, now);
+    const recordLog = instance.preview();
+    return applyAfterHandler(recordLog, afterHandler);
+  }
+  /**
+   * Display the collection of cards and logs for the card scheduled at the current time, after applying a specific grade rating.
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param grade Rating of the review (Again, Hard, Good, Easy)
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const card: Card = createEmptyCard(new Date());
+   * const f = fsrs();
+   * const recordLogItem = f.next(card, new Date(), Rating.Again);
+   * ```
+   * @example
+   * ```typescript
+   * interface RevLogUnchecked
+   *   extends Omit<ReviewLog, "due" | "review" | "state" | "rating"> {
+   *   cid: string;
+   *   due: Date | number;
+   *   state: StateType;
+   *   review: Date | number;
+   *   rating: RatingType;
+   * }
+   *
+   * interface NextRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked;
+   * }
+   *
+  function nextAfterHandler(recordLogItem: RecordLogItem) {
+    const recordItem = {
+      card: {
+        ...(recordLogItem.card as Card & { cid: string }),
+        due: recordLogItem.card.due.getTime(),
+        state: State[recordLogItem.card.state] as StateType,
+        last_review: recordLogItem.card.last_review
+          ? recordLogItem.card.last_review!.getTime()
+          : null,
+      },
+      log: {
+        ...recordLogItem.log,
+        cid: (recordLogItem.card as Card & { cid: string }).cid,
+        due: recordLogItem.log.due.getTime(),
+        review: recordLogItem.log.review.getTime(),
+        state: State[recordLogItem.log.state] as StateType,
+        rating: Rating[recordLogItem.log.rating] as RatingType,
+      },
+    };
+    return recordItem
+  }
+   * const card: Card = createEmptyCard(new Date(), cardAfterHandler); //see method:  createEmptyCard
+   * const f = fsrs();
+   * const recordLogItem = f.repeat(card, new Date(), Rating.Again, nextAfterHandler);
+   * ```
+   */
+  next(card, now, grade, afterHandler) {
+    const instance = this.getScheduler(card, now);
+    const g = TypeConvert.rating(grade);
+    if (g === Rating.Manual) {
+      throw new FSRSValidationError("Cannot review a manual rating");
+    }
+    const recordLogItem = instance.review(g);
+    return applyAfterHandler(recordLogItem, afterHandler);
+  }
+  /**
+   * Get the retrievability of the card
+   * @param card  Card to be processed
+   * @param now  Current time or scheduled time
+   * @param format  default:true , Convert the result to another type. (Optional)
+   * @returns  The retrievability of the card,if format is true, the result is a string, otherwise it is a number
+   */
+  get_retrievability(card, now, format = true) {
+    const processedCard = TypeConvert.card(card);
+    now = now ? TypeConvert.time(now) : /* @__PURE__ */ new Date();
+    const t = processedCard.state !== State.New ? Math.max(date_diff(now, processedCard.last_review, "days"), 0) : 0;
+    const r = processedCard.state !== State.New ? this.forgetting_curve(t, +processedCard.stability.toFixed(8)) : 0;
+    return format ? `${(r * 100).toFixed(2)}%` : r;
+  }
+  /**
+   *
+   * @param card Card to be processed
+   * @param log last review log
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now);
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now);
+   * const { card, log } = repeatFormAfterHandler[Rating.Hard];
+   * const rollbackFromAfterHandler = f.rollback(card, log);
+   * ```
+   *
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now, cardAfterHandler);  //see method: createEmptyCard
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now, repeatAfterHandler); //see method: fsrs.repeat()
+   * const { card, log } = repeatFormAfterHandler[Rating.Hard];
+   * const rollbackFromAfterHandler = f.rollback(card, log, cardAfterHandler);
+   * ```
+   */
+  rollback(card, log, afterHandler) {
+    const processedCard = TypeConvert.card(card);
+    const processedLog = TypeConvert.review_log(log);
+    if (processedLog.rating === Rating.Manual) {
+      throw new FSRSValidationError("Cannot rollback a manual rating");
+    }
+    let last_due;
+    let last_review;
+    let last_lapses;
+    switch (processedLog.state) {
+      case State.New:
+        last_due = processedLog.due;
+        last_review = void 0;
+        last_lapses = 0;
+        break;
+      case State.Learning:
+      case State.Relearning:
+      case State.Review:
+        last_due = processedLog.review;
+        last_review = processedLog.due;
+        last_lapses = processedCard.lapses - (processedLog.rating === Rating.Again && processedLog.state === State.Review ? 1 : 0);
+        break;
+    }
+    const prevCard = {
+      ...processedCard,
+      due: last_due,
+      stability: processedLog.stability,
+      difficulty: processedLog.difficulty,
+      elapsed_days: processedLog.last_elapsed_days,
+      scheduled_days: processedLog.scheduled_days,
+      reps: Math.max(0, processedCard.reps - 1),
+      lapses: Math.max(0, last_lapses),
+      learning_steps: processedLog.learning_steps,
+      state: processedLog.state,
+      last_review
+    };
+    return applyAfterHandler(prevCard, afterHandler);
+  }
+  /**
+   *
+   * @param card Card to be processed
+   * @param now Current time or scheduled time
+   * @param reset_count Should the review count information(reps,lapses) be reset. (Optional)
+   * @param afterHandler Convert the result to another type. (Optional)
+   * @example
+   * ```typescript
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCard = createEmptyCard(now);
+   * const scheduling_cards = f.repeat(emptyCard, now);
+   * const { card, log } = scheduling_cards[Rating.Hard];
+   * const forgetCard = f.forget(card, new Date(), true);
+   * ```
+   *
+   * @example
+   * ```typescript
+   * interface RepeatRecordLog {
+   *   card: CardUnChecked; //see method: createEmptyCard
+   *   log: RevLogUnchecked; //see method: fsrs.repeat()
+   * }
+   *
+   * function forgetAfterHandler(recordLogItem: RecordLogItem): RepeatRecordLog {
+   *     return {
+   *       card: {
+   *         ...(recordLogItem.card as Card & { cid: string }),
+   *         due: recordLogItem.card.due.getTime(),
+   *         state: State[recordLogItem.card.state] as StateType,
+   *         last_review: recordLogItem.card.last_review
+   *           ? recordLogItem.card.last_review!.getTime()
+   *           : null,
+   *       },
+   *       log: {
+   *         ...recordLogItem.log,
+   *         cid: (recordLogItem.card as Card & { cid: string }).cid,
+   *         due: recordLogItem.log.due.getTime(),
+   *         review: recordLogItem.log.review.getTime(),
+   *         state: State[recordLogItem.log.state] as StateType,
+   *         rating: Rating[recordLogItem.log.rating] as RatingType,
+   *       },
+   *     };
+   * }
+   * const now = new Date();
+   * const f = fsrs();
+   * const emptyCardFormAfterHandler = createEmptyCard(now, cardAfterHandler); //see method:  createEmptyCard
+   * const repeatFormAfterHandler = f.repeat(emptyCardFormAfterHandler, now, repeatAfterHandler); //see method: fsrs.repeat()
+   * const { card } = repeatFormAfterHandler[Rating.Hard];
+   * const forgetFromAfterHandler = f.forget(card, date_scheduler(now, 1, true), false, forgetAfterHandler);
+   * ```
+   */
+  forget(card, now, reset_count = false, afterHandler) {
+    const processedCard = TypeConvert.card(card);
+    now = TypeConvert.time(now);
+    const scheduled_days = processedCard.state === State.New ? 0 : date_diff(now, processedCard.due, "days");
+    const forget_log = {
+      rating: Rating.Manual,
+      state: processedCard.state,
+      due: processedCard.due,
+      stability: processedCard.stability,
+      difficulty: processedCard.difficulty,
+      elapsed_days: 0,
+      last_elapsed_days: processedCard.elapsed_days,
+      scheduled_days,
+      learning_steps: processedCard.learning_steps,
+      review: now
+    };
+    const forget_card = {
+      ...processedCard,
+      due: now,
+      stability: 0,
+      difficulty: 0,
+      elapsed_days: 0,
+      scheduled_days: 0,
+      reps: reset_count ? 0 : processedCard.reps,
+      lapses: reset_count ? 0 : processedCard.lapses,
+      learning_steps: 0,
+      state: State.New,
+      last_review: processedCard.last_review
+    };
+    const recordLogItem = { card: forget_card, log: forget_log };
+    return applyAfterHandler(recordLogItem, afterHandler);
+  }
+  /**
+   * Reschedules the current card and returns the rescheduled collections and reschedule item.
+   *
+   * @template T - The type of the record log item.
+   * @param {CardInput | Card} current_card - The current card to be rescheduled.
+   * @param {Array<FSRSHistory>} reviews - The array of FSRSHistory objects representing the reviews.
+   * @param {Partial<RescheduleOptions<T>>} options - The optional reschedule options.
+   * @returns {IReschedule<T>} - The rescheduled collections and reschedule item.
+   *
+   * @example
+   * ```typescript
+   * const f = fsrs()
+   * const grades: Grade[] = [Rating.Good, Rating.Good, Rating.Good, Rating.Good]
+   * const reviews_at = [
+   *   new Date(2024, 8, 13),
+   *   new Date(2024, 8, 13),
+   *   new Date(2024, 8, 17),
+   *   new Date(2024, 8, 28),
+   * ]
+   *
+   * const reviews: FSRSHistory[] = []
+   * for (let i = 0; i < grades.length; i++) {
+   *   reviews.push({
+   *     rating: grades[i],
+   *     review: reviews_at[i],
+   *   })
+   * }
+   *
+   * const results_short = scheduler.reschedule(
+   *   createEmptyCard(),
+   *   reviews,
+   *   {
+   *     skipManual: false,
+   *   }
+   * )
+   * console.log(results_short)
+   * ```
+   */
+  reschedule(current_card, reviews = [], options = {}) {
+    const {
+      recordLogHandler,
+      reviewsOrderBy,
+      skipManual = true,
+      now = /* @__PURE__ */ new Date(),
+      update_memory_state: updateMemoryState = false
+    } = options;
+    if (reviewsOrderBy && typeof reviewsOrderBy === "function") {
+      reviews.sort(reviewsOrderBy);
+    }
+    if (skipManual) {
+      reviews = reviews.filter((review) => review.rating !== Rating.Manual);
+    }
+    const rescheduleSvc = new Reschedule(this);
+    const collections = rescheduleSvc.reschedule(
+      options.first_card || createEmptyCard(),
+      reviews
+    );
+    const len = collections.length;
+    const cur_card = TypeConvert.card(current_card);
+    const manual_item = rescheduleSvc.calculateManualRecord(
+      cur_card,
+      now,
+      len ? collections[len - 1] : void 0,
+      updateMemoryState
+    );
+    return {
+      collections: typeof recordLogHandler === "function" ? collections.map(recordLogHandler) : collections,
+      reschedule_item: manual_item ? applyAfterHandler(manual_item, recordLogHandler) : null
+    };
+  }
+};
+var fsrs = (params) => {
+  return new FSRS(params || {});
+};
+
+// src/cards.ts
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var AGAIN_MS = 60 * 1e3;
+var FSRS_IMPLEMENTATION_VERSION = "5.4.2";
+var FSRS_PARAMETER_VERSION = "fsrs-6-defaults-v1";
+var defaults = fsrs({ enable_fuzz: false }).parameters;
+var FSRS_PARAMETERS = Object.freeze({
+  ...defaults,
+  w: Object.freeze([...defaults.w]),
+  learning_steps: Object.freeze([...defaults.learning_steps]),
+  relearning_steps: Object.freeze([...defaults.relearning_steps])
+});
+var MAX_INTERVAL_DAYS = FSRS_PARAMETERS.maximum_interval + 2;
+var MAX_FRONT_LENGTH = 4e3;
+var MAX_BACK_LENGTH = 5e4;
+var MAX_DATE_MS = 864e13;
+var MAX_ID_LENGTH = 256;
+var MAX_SOURCE_PATH_LENGTH = 4096;
+var GRADES = Object.freeze({ again: Rating.Again, hard: Rating.Hard, good: Rating.Good, easy: Rating.Easy });
+var CardValidationError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CardValidationError";
+  }
+};
+function fail(message) {
+  throw new CardValidationError(message);
+}
+function isRecord(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function field(value, key, label2 = key) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (!descriptor || !("value" in descriptor)) fail(`Missing or invalid ${label2}.`);
+  return descriptor.value;
+}
+function record(value, label2, keys) {
+  if (!isRecord(value)) fail(`${label2} must be an object.`);
+  if (Reflect.ownKeys(value).some((key) => typeof key !== "string" || !keys.includes(key))) {
+    fail(`Unsupported ${label2} fields. Keep this data read-only and use a compatible plugin version.`);
+  }
+  return value;
+}
+function array(value, label2, parse) {
+  if (!Array.isArray(value)) fail(`${label2} must be an array.`);
+  const result = [];
+  for (let i = 0; i < value.length; i++) result.push(parse(field(value, String(i), `${label2}[${i}]`), `${label2}[${i}]`));
+  return result;
+}
+function text(value, label2, maximum, allowEmpty = false) {
+  if (typeof value !== "string" || value.length > maximum || !allowEmpty && !value.trim()) {
+    fail(`${label2} must be ${allowEmpty ? "text" : "nonblank text"} of at most ${maximum} characters.`);
+  }
+  return value;
+}
+function timestamp(value, label2) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > MAX_DATE_MS) {
+    fail(`${label2} must be a valid nonnegative millisecond timestamp.`);
+  }
+  return value;
+}
+function integer(value, label2, maximum = Number.MAX_SAFE_INTEGER) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    fail(`${label2} must be an integer between 0 and ${maximum}.`);
+  }
+  return value;
+}
+function decimal(value, label2, minimum, maximum) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) fail(`${label2} must be a finite number between ${minimum} and ${maximum}.`);
+  return value;
+}
+function boolean(value, label2) {
+  if (typeof value !== "boolean") fail(`${label2} must be true or false.`);
+  return value;
+}
+function parameterCopy() {
+  return { ...FSRS_PARAMETERS, w: [...FSRS_PARAMETERS.w], learning_steps: [...FSRS_PARAMETERS.learning_steps], relearning_steps: [...FSRS_PARAMETERS.relearning_steps] };
+}
+function normalizeParameters(raw, label2) {
+  const value = record(raw, label2, Object.keys(FSRS_PARAMETERS));
+  for (const key of ["request_retention", "maximum_interval", "enable_fuzz", "enable_short_term"]) {
+    if (field(value, key, `${label2}.${key}`) !== FSRS_PARAMETERS[key]) fail(`Unsupported FSRS parameter ${key}. Keep this data read-only.`);
+  }
+  for (const key of ["w", "learning_steps", "relearning_steps"]) {
+    const actual = array(field(value, key), `${label2}.${key}`, (item) => item);
+    const expected = FSRS_PARAMETERS[key];
+    if (actual.length !== expected.length || actual.some((item, index) => item !== expected[index])) fail(`Unsupported FSRS parameter ${key}. Keep this data read-only.`);
+  }
+  return parameterCopy();
+}
+var MEMORY_FIELDS = ["state", "stability", "difficulty", "elapsed_days", "scheduled_days", "learning_steps"];
+function memory(value, label2) {
+  const state = integer(field(value, "state"), `${label2}.state`, State.Relearning);
+  const result = {
+    state,
+    stability: decimal(field(value, "stability"), `${label2}.stability`, state === State.New ? 0 : S_MIN, S_MAX),
+    difficulty: decimal(field(value, "difficulty"), `${label2}.difficulty`, state === State.New ? 0 : 1, 10),
+    elapsed_days: integer(field(value, "elapsed_days"), `${label2}.elapsed_days`),
+    scheduled_days: integer(field(value, "scheduled_days"), `${label2}.scheduled_days`, MAX_INTERVAL_DAYS),
+    learning_steps: integer(field(value, "learning_steps"), `${label2}.learning_steps`, state === State.Learning ? FSRS_PARAMETERS.learning_steps.length - 1 : 0)
+  };
+  if (state === State.New && (result.stability !== 0 || result.difficulty !== 0 || result.scheduled_days !== 0 || result.learning_steps !== 0)) fail(`Invalid new-card memory in ${label2}.`);
+  if (state === State.Review && result.scheduled_days < 1) fail(`Invalid review interval in ${label2}.`);
+  if ((state === State.Learning || state === State.Relearning) && result.scheduled_days !== 0) fail(`Invalid short-term interval in ${label2}.`);
+  return result;
+}
+function normalizeFSRSCard(raw, label2) {
+  const value = record(raw, label2, ["due", ...MEMORY_FIELDS, "reps", "lapses", "last_review"]);
+  const result = {
+    due: timestamp(field(value, "due"), `${label2}.due`),
+    ...memory(value, label2),
+    reps: integer(field(value, "reps"), `${label2}.reps`),
+    lapses: integer(field(value, "lapses"), `${label2}.lapses`)
+  };
+  if (Object.getOwnPropertyDescriptor(value, "last_review")) result.last_review = timestamp(field(value, "last_review"), `${label2}.last_review`);
+  if (result.state === State.New) {
+    if (result.reps !== 0 || result.lapses !== 0 || result.elapsed_days !== 0 || result.last_review !== void 0) fail(`Invalid fresh FSRS state in ${label2}.`);
+  } else if (result.reps < 1 || result.last_review === void 0 || result.due <= result.last_review) fail(`Incomplete reviewed FSRS state in ${label2}.`);
+  if (result.lapses > result.reps) fail(`Invalid FSRS lapse count in ${label2}.`);
+  return result;
+}
+function normalizeLog(raw, label2) {
+  const value = record(raw, label2, ["rating", "due", "review", "last_elapsed_days", ...MEMORY_FIELDS]);
+  const rating = integer(field(value, "rating"), `${label2}.rating`, Rating.Easy);
+  if (rating < Rating.Again) fail(`${label2} must record an actual rating.`);
+  return {
+    rating,
+    ...memory(value, label2),
+    due: timestamp(field(value, "due"), `${label2}.due`),
+    review: timestamp(field(value, "review"), `${label2}.review`),
+    last_elapsed_days: integer(field(value, "last_elapsed_days"), `${label2}.last_elapsed_days`)
+  };
+}
+function normalizeFSRS(raw, label2) {
+  const value = record(raw, label2, ["schemaVersion", "algorithm", "implementation", "implementationVersion", "parameterVersion", "parameters", "card", "logs", "baseline"]);
+  if (field(value, "schemaVersion") !== 1 || field(value, "algorithm") !== "FSRS-6" || field(value, "implementation") !== "ts-fsrs" || field(value, "implementationVersion") !== FSRS_IMPLEMENTATION_VERSION || field(value, "parameterVersion") !== FSRS_PARAMETER_VERSION) {
+    fail("Unsupported FSRS version. Keep this data read-only and use a compatible plugin version.");
+  }
+  const parameters = normalizeParameters(field(value, "parameters"), `${label2}.parameters`);
+  const card = normalizeFSRSCard(field(value, "card"), `${label2}.card`);
+  const logs = array(field(value, "logs"), `${label2}.logs`, normalizeLog);
+  const source = record(field(value, "baseline"), `${label2}.baseline`, ["kind", "at", "reviews", "lapses", "logIndex"]);
+  const kind = field(source, "kind");
+  if (kind !== "new" && kind !== "legacy" && kind !== "relearn") fail("Unknown FSRS baseline.");
+  const baseline = { kind, at: timestamp(field(source, "at"), "FSRS baseline time"), reviews: integer(field(source, "reviews"), "FSRS baseline reviews"), lapses: integer(field(source, "lapses"), "FSRS baseline lapses"), logIndex: integer(field(source, "logIndex"), "FSRS baseline log index", logs.length) };
+  if (baseline.logIndex > baseline.reviews || kind === "new" && (baseline.reviews !== 0 || baseline.lapses !== 0 || baseline.logIndex !== 0) || kind === "legacy" && baseline.logIndex !== 0) fail("Invalid FSRS baseline counters.");
+  if (logs.length - baseline.logIndex !== card.reps) fail("FSRS state and review log count do not agree.");
+  let lastTime = 0;
+  for (const [index, log] of logs.entries()) {
+    if (log.review < lastTime || index >= baseline.logIndex && log.review < baseline.at) fail("FSRS review history is out of order.");
+    if (log.due > log.review || log.elapsed_days !== (log.state === State.New ? 0 : dateDiffInDays(new Date(log.due), new Date(log.review)))) fail("FSRS review timing is inconsistent.");
+    lastTime = log.review;
+  }
+  if (baseline.logIndex > 0 && logs[baseline.logIndex - 1].review > baseline.at) fail("FSRS reset predates its review history.");
+  if (card.reps === 0) {
+    if (card.state !== State.New || card.due !== baseline.at) fail("FSRS baseline does not match its fresh state.");
+  } else {
+    const first = logs[baseline.logIndex], last = logs[logs.length - 1];
+    if (first.state !== State.New || first.due !== baseline.at || last.review !== card.last_review) fail("FSRS state and review history do not agree.");
+    if (card.elapsed_days !== last.elapsed_days) fail("FSRS elapsed time does not match its latest review.");
+    const activeLapses = logs.slice(baseline.logIndex).filter((log) => log.state === State.Review && log.rating === Rating.Again).length;
+    if (card.lapses !== activeLapses) fail("FSRS lapse count does not match its review history.");
+  }
+  return { schemaVersion: 1, algorithm: "FSRS-6", implementation: "ts-fsrs", implementationVersion: FSRS_IMPLEMENTATION_VERSION, parameterVersion: FSRS_PARAMETER_VERSION, parameters, card, logs, baseline };
+}
+function normalizeSR(raw, label2) {
+  const value = record(raw, label2, ["algorithm", "version", "parameters", "card", "logs", "baseline"]);
+  if (field(value, "algorithm") !== "SM-2-OSR" || field(value, "version") !== SR_VERSION) fail("Unsupported SM-2-OSR version");
+  const params = record(field(value, "parameters"), label2 + ".parameters", Object.keys(SR_PARAMETERS));
+  for (const key of Object.keys(SR_PARAMETERS)) if (field(params, key) !== SR_PARAMETERS[key]) fail("Unsupported SM-2-OSR parameters");
+  const parseMemory = (raw2, label3) => {
+    const m = record(raw2, label3, ["interval", "ease", "due"]);
+    return { interval: integer(field(m, "interval"), label3 + ".interval", SR_MAX_INTERVAL), ease: integer(field(m, "ease"), label3 + ".ease"), due: timestamp(field(m, "due"), label3 + ".due") };
+  };
+  const card = parseMemory(field(value, "card"), label2 + ".card");
+  if (card.ease < 130) fail("Invalid SM-2-OSR ease");
+  const b = record(field(value, "baseline"), label2 + ".baseline", ["at", "reviews", "lapses"]);
+  const baseline = { at: timestamp(field(b, "at"), label2 + ".at"), reviews: integer(field(b, "reviews"), label2 + ".reviews"), lapses: integer(field(b, "lapses"), label2 + ".lapses") };
+  const logs = array(field(value, "logs"), label2 + ".logs", (raw2, label3) => {
+    const l = record(raw2, label3, ["rating", "review", "delayDays", "before", "after", "histogram"]), rating = field(l, "rating");
+    if (!["again", "hard", "good", "easy"].includes(rating)) fail("Invalid SM-2-OSR rating");
+    const h = field(l, "histogram");
+    if (!isRecord(h)) fail("Invalid due histogram");
+    const histogram = {};
+    for (const key of Object.keys(h)) {
+      if (!/^-?\d+$/.test(key)) fail("Invalid due histogram day");
+      histogram[key] = integer(field(h, key), "Histogram count");
+    }
+    return { rating, delayDays: integer(field(l, "delayDays"), label3 + ".delayDays"), review: timestamp(field(l, "review"), label3 + ".review"), before: parseMemory(field(l, "before"), label3 + ".before"), after: parseMemory(field(l, "after"), label3 + ".after"), histogram };
+  });
+  let previous = emptySR(baseline.at).card, lastTime = baseline.at;
+  for (const log of logs) {
+    if (log.review < lastTime || JSON.stringify(log.before) !== JSON.stringify(previous)) fail("SM-2-OSR history is inconsistent");
+    const expected = scheduleSR(log.before, log.rating, log.review, log.histogram, log.delayDays);
+    if (expected.interval !== log.after.interval || expected.ease !== log.after.ease || Math.abs(log.after.due - (log.review + expected.interval * DAY_MS)) > 27 * 60 * 60 * 1e3) fail("SM-2-OSR scheduling result is inconsistent");
+    previous = log.after;
+    lastTime = log.review;
+  }
+  if (JSON.stringify(previous) !== JSON.stringify(card)) fail("SM-2-OSR state does not match its history");
+  return { algorithm: "SM-2-OSR", version: SR_VERSION, parameters: { ...SR_PARAMETERS }, card, logs, baseline };
+}
+function srHistogram(cards, now) {
+  const result = {};
+  for (const c of cards) {
+    if (c.suspended || !c.sr) continue;
+    const day = String(Math.ceil((c.dueAt - now) / DAY_MS));
+    result[day] = (result[day] || 0) + 1;
+  }
+  return result;
+}
+function activeAlgorithm(card) {
+  return card.sr ? "sm2-osr" : "fsrs";
+}
+function archiveSchedule(card) {
+  var _a2;
+  return [...(_a2 = card.schedulingHistory) != null ? _a2 : [], ...card.fsrs ? [{ fsrs: card.fsrs }] : [], ...card.sr ? [{ sr: card.sr }] : []];
+}
+function normalizeCard(raw, label2) {
+  if (!isRecord(raw)) fail(`${label2} must be a card object.`);
+  const get = (key) => field(raw, key, `${label2}.${key}`);
+  const lastReviewedAt = get("lastReviewedAt");
+  const ref = Object.getOwnPropertyDescriptor(raw, "sourceRef");
+  let sourceRef;
+  if (ref) {
+    if (!("value" in ref) || !isRecord(ref.value)) fail("Invalid source evidence");
+    const r = ref.value;
+    const kindProperty = Object.getOwnPropertyDescriptor(r, "kind");
+    const kind = kindProperty ? field(r, "kind") : void 0;
+    if (kindProperty && kind === void 0) fail("Unsupported source evidence kind");
+    if (kind !== void 0 && kind !== "selection" && kind !== "passage") fail("Unsupported source evidence kind");
+    const headingPath = Object.getOwnPropertyDescriptor(r, "headingPath") ? array(field(r, "headingPath"), "source heading path", (value, label3) => text(value, label3, 4e3)) : void 0;
+    if (headingPath && headingPath.length > 6) fail("Invalid source heading path");
+    const question = kind === "passage" ? text(field(r, "question"), "source question", 4e3) : void 0;
+    const passageKind = kind === "passage" ? field(r, "passageKind") : void 0;
+    if (kind === "passage" && (typeof passageKind !== "string" || !["section", "intro", "preamble", "document"].includes(passageKind) || !headingPath)) fail("Invalid source passage evidence");
+    sourceRef = { line: integer(field(r, "line"), "source line"), endLine: integer(field(r, "endLine"), "source end line"), heading: text(field(r, "heading"), "source heading", 4e3, true), excerpt: text(field(r, "excerpt"), "source excerpt", 5e4), fingerprint: text(field(r, "fingerprint"), "source fingerprint", 100), ...kind ? { kind } : {}, ...headingPath ? { headingPath } : {}, ...kind === "passage" ? { question, passageKind } : {} };
+    if (sourceRef.endLine < sourceRef.line) fail("Invalid source line range");
+  }
+  const sr = Object.getOwnPropertyDescriptor(raw, "sr") ? normalizeSR(get("sr"), `${label2}.sr`) : void 0;
+  const history = Object.getOwnPropertyDescriptor(raw, "schedulingHistory") ? array(get("schedulingHistory"), `${label2}.history`, (item, label3) => {
+    const value = record(item, label3, ["fsrs", "sr"]);
+    if (Object.keys(value).length !== 1) fail("Invalid archived scheduler");
+    return Object.hasOwn(value, "fsrs") ? { fsrs: normalizeFSRS(field(value, "fsrs"), label3) } : { sr: normalizeSR(field(value, "sr"), label3) };
+  }) : void 0;
+  const schedule = Object.getOwnPropertyDescriptor(raw, "fsrs");
+  const scheduling = schedule ? normalizeFSRS(get("fsrs"), `${label2}.fsrs`) : void 0;
+  const result = {
+    ...sourceRef ? { sourceRef } : {},
+    ...scheduling ? { fsrs: scheduling } : {},
+    ...sr ? { sr } : {},
+    ...history ? { schedulingHistory: history } : {},
+    id: text(get("id"), `${label2}.id`, MAX_ID_LENGTH),
+    front: text(get("front"), `${label2}.front`, MAX_FRONT_LENGTH),
+    back: text(get("back"), `${label2}.back`, MAX_BACK_LENGTH),
+    sourcePath: text(get("sourcePath"), `${label2}.sourcePath`, MAX_SOURCE_PATH_LENGTH, true),
+    createdAt: timestamp(get("createdAt"), `${label2}.createdAt`),
+    updatedAt: timestamp(get("updatedAt"), `${label2}.updatedAt`),
+    dueAt: timestamp(get("dueAt"), `${label2}.dueAt`),
+    intervalDays: integer(get("intervalDays"), `${label2}.intervalDays`, sr ? SR_MAX_INTERVAL : MAX_INTERVAL_DAYS),
+    reviews: integer(get("reviews"), `${label2}.reviews`),
+    lapses: integer(get("lapses"), `${label2}.lapses`),
+    suspended: boolean(get("suspended"), `${label2}.suspended`),
+    lastReviewedAt: lastReviewedAt === null ? null : timestamp(lastReviewedAt, `${label2}.lastReviewedAt`),
+    revision: integer(get("revision"), `${label2}.revision`)
+  };
+  if (sr && scheduling) fail("A card cannot have two active schedulers");
+  if (sr) {
+    const last = sr.logs.at(-1);
+    if (result.dueAt !== sr.card.due || result.intervalDays !== (last ? sr.card.interval : 0) || result.reviews !== sr.baseline.reviews + sr.logs.length || result.lapses !== sr.baseline.lapses + sr.logs.filter((l) => l.rating === "again").length || last && result.lastReviewedAt !== last.review) fail("Card summary and SM-2-OSR state do not agree");
+  }
+  if (scheduling) {
+    const state = scheduling.card, base = scheduling.baseline;
+    if (result.dueAt !== state.due || result.intervalDays !== state.scheduled_days || result.reviews !== integer(base.reviews + state.reps, "Cumulative reviews") || result.lapses !== integer(base.lapses + state.lapses, "Cumulative lapses") || state.last_review !== void 0 && result.lastReviewedAt !== state.last_review) fail("Card summary and FSRS state do not agree. Keep this data read-only.");
+    if (base.kind === "new" && state.reps === 0 && result.lastReviewedAt !== null) fail("A new FSRS card cannot have an earlier review.");
+  }
+  return result;
+}
+function normalizeData(raw, now) {
+  timestamp(now, "Current time");
+  if (raw === null || raw === void 0) return { version: 2, cards: [] };
+  if (!isRecord(raw)) fail("Saved flashcard data must be an object.");
+  if (Reflect.ownKeys(raw).length === 0) return { version: 2, cards: [] };
+  const version2 = field(raw, "version", "flashcard data version");
+  if (version2 !== 2 && version2 !== 3) fail("Unsupported flashcard data version. Keep this data read-only and use a compatible plugin version.");
+  const cards = array(field(raw, "cards", "flashcard cards array"), "Saved flashcard cards", normalizeCard);
+  const ids = /* @__PURE__ */ new Set();
+  for (const card of cards) {
+    if (ids.has(card.id)) fail("Duplicate flashcard ID.");
+    ids.add(card.id);
+  }
+  return { version: version2 === 3 || cards.some((c) => c.sr || c.schedulingHistory) ? 3 : 2, cards };
+}
+function serializeCard(card) {
+  const { due, last_review, ...memory2 } = card;
+  return { ...memory2, due: timestamp(due.getTime(), "FSRS due time"), ...last_review === void 0 ? {} : { last_review: timestamp(last_review.getTime(), "FSRS last review") } };
+}
+function serializeLog(log) {
+  return { ...log, due: timestamp(log.due.getTime(), "FSRS log due"), review: timestamp(log.review.getTime(), "FSRS log review") };
+}
+function emptySchedule(kind, now, reviews = 0, lapses = 0, logs = []) {
+  return { schemaVersion: 1, algorithm: "FSRS-6", implementation: "ts-fsrs", implementationVersion: FSRS_IMPLEMENTATION_VERSION, parameterVersion: FSRS_PARAMETER_VERSION, parameters: parameterCopy(), card: serializeCard(createEmptyCard(new Date(now))), logs, baseline: { kind, at: now, reviews, lapses, logIndex: logs.length } };
+}
+function createCard(front, back, sourcePath, now, id) {
+  const createdAt = timestamp(now, "Current time");
+  return {
+    id: text(id, "Card ID", MAX_ID_LENGTH),
+    front: text(front, "Card front", MAX_FRONT_LENGTH),
+    back: text(back, "Card back", MAX_BACK_LENGTH),
+    sourcePath: text(sourcePath, "Source path", MAX_SOURCE_PATH_LENGTH, true),
+    createdAt,
+    updatedAt: createdAt,
+    dueAt: createdAt,
+    intervalDays: 0,
+    reviews: 0,
+    lapses: 0,
+    suspended: false,
+    lastReviewedAt: null,
+    revision: 0,
+    fsrs: emptySchedule("new", createdAt)
+  };
+}
+function applyRating(card, rating, now, algorithm = activeAlgorithm(card), histogram = {}) {
+  var _a2, _b, _c, _d;
+  let current = normalizeCard(card, "Card");
+  const reviewedAt = timestamp(now, "Review time");
+  if (rating !== "again" && rating !== "hard" && rating !== "good" && rating !== "easy") fail("Unknown flashcard rating.");
+  if (algorithm !== "fsrs" && algorithm !== "sm2-osr") fail("Unsupported scheduling algorithm");
+  if ((algorithm === "sm2-osr" || activeAlgorithm(current) !== algorithm) && reviewedAt < ((_a2 = current.lastReviewedAt) != null ? _a2 : current.createdAt)) fail("Review time predates the latest rating");
+  if (activeAlgorithm(current) !== algorithm) {
+    const history = archiveSchedule(current);
+    delete current.fsrs;
+    delete current.sr;
+    current.schedulingHistory = history;
+  }
+  if (algorithm === "sm2-osr") {
+    const schedule2 = (_b = current.sr) != null ? _b : emptySR(reviewedAt, current.reviews, current.lapses), next = scheduleSR(schedule2.card, rating, reviewedAt, histogram);
+    return normalizeCard({ ...current, sr: { ...schedule2, card: next, logs: [...schedule2.logs, { rating, review: reviewedAt, delayDays: srDelay(schedule2.card, reviewedAt), before: { ...schedule2.card }, after: { ...next }, histogram: { ...histogram } }] }, updatedAt: reviewedAt, dueAt: next.due, intervalDays: next.interval, reviews: current.reviews + 1, lapses: current.lapses + (rating === "again" ? 1 : 0), lastReviewedAt: reviewedAt, revision: current.revision + 1 }, "Rated card");
+  }
+  const schedule = (_c = current.fsrs) != null ? _c : emptySchedule("legacy", reviewedAt, current.reviews, current.lapses);
+  if (reviewedAt < ((_d = schedule.card.last_review) != null ? _d : schedule.baseline.at)) fail("Review time predates the FSRS state. Check the system clock before rating.");
+  try {
+    const input = { ...schedule.card, due: new Date(schedule.card.due), ...schedule.card.last_review === void 0 ? {} : { last_review: new Date(schedule.card.last_review) } };
+    const result = fsrs(schedule.parameters).next(input, new Date(reviewedAt), GRADES[rating]);
+    const next = serializeCard(result.card);
+    return normalizeCard({
+      ...current,
+      fsrs: { ...schedule, card: next, logs: [...schedule.logs, serializeLog(result.log)] },
+      updatedAt: reviewedAt,
+      dueAt: next.due,
+      intervalDays: next.scheduled_days,
+      reviews: integer(current.reviews + 1, "Review count"),
+      lapses: integer(schedule.baseline.lapses + next.lapses, "Lapse count"),
+      lastReviewedAt: reviewedAt,
+      revision: integer(current.revision + 1, "Revision")
+    }, "Rated card");
+  } catch (error) {
+    if (error instanceof CardValidationError) throw error;
+    fail(`FSRS scheduling failed: ${error instanceof Error ? error.message : "invalid scheduler result"}`);
+  }
+}
+function resetScheduling(card, now) {
+  var _a2, _b, _c, _d;
+  const current = normalizeCard(card, "Card");
+  const resetAt = timestamp(now, "Reset time");
+  if (current.sr) {
+    if (resetAt < ((_a2 = current.lastReviewedAt) != null ? _a2 : current.createdAt)) fail("Reset predates review");
+    return normalizeCard({ ...current, schedulingHistory: archiveSchedule(current), sr: emptySR(resetAt, current.reviews, current.lapses), dueAt: resetAt, intervalDays: 0, suspended: false, updatedAt: resetAt, revision: current.revision + 1 }, "Reset card");
+  }
+  if (current.fsrs && resetAt < ((_b = current.fsrs.card.last_review) != null ? _b : current.fsrs.baseline.at)) fail("Reset time predates the FSRS state. Check the system clock.");
+  return normalizeCard({
+    ...current,
+    fsrs: emptySchedule("relearn", resetAt, current.reviews, current.lapses, (_d = (_c = current.fsrs) == null ? void 0 : _c.logs) != null ? _d : []),
+    dueAt: resetAt,
+    intervalDays: 0,
+    suspended: false,
+    updatedAt: resetAt,
+    revision: integer(current.revision + 1, "Revision")
+  }, "Reset card");
+}
+function dueCards(cards, now) {
+  timestamp(now, "Current time");
+  return cards.filter((card) => !card.suspended && card.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+// src/decks.ts
+var DEFAULT_DECK = "default";
+function fail2(s) {
+  throw new CardValidationError(s);
+}
+var own = (o, k) => {
+  const d = Object.getOwnPropertyDescriptor(o, k);
+  if (!d || !("value" in d)) fail2("\u7F3A\u5C11\u5361\u7EC4\u5B57\u6BB5\uFF1A" + k);
+  return d.value;
+};
+function normalizeStudyData(raw, now = Date.now()) {
+  const cards = normalizeData(raw, now);
+  const object = raw;
+  const algorithm = object && Object.hasOwn(object, "schedulingAlgorithm") ? own(object, "schedulingAlgorithm") : void 0;
+  if (algorithm !== void 0 && algorithm !== "fsrs" && algorithm !== "sm2-osr") fail2("\u4E0D\u652F\u6301\u7684\u590D\u4E60\u7B97\u6CD5");
+  const preference = algorithm ? { schedulingAlgorithm: algorithm } : {};
+  if (!object || !Object.prototype.hasOwnProperty.call(object, "format")) return { ...cards, ...preference, format: "passage-practice-vault", storageVersion: 1, decks: [{ id: DEFAULT_DECK, name: "\u9ED8\u8BA4\u5361\u7EC4", cardIds: cards.cards.map((c) => c.id), createdAt: now, updatedAt: now, revision: 0 }] };
+  if (own(object, "format") !== "passage-practice-vault" || ![1, 2].includes(own(object, "storageVersion"))) fail2("\u4E0D\u652F\u6301\u7684\u5361\u7EC4\u5B58\u50A8\u7248\u672C");
+  const decksRaw = own(object, "decks");
+  if (!Array.isArray(decksRaw) || !decksRaw.length || decksRaw.length > 1e4) fail2("\u5361\u7EC4\u5217\u8868\u635F\u574F");
+  const ids = /* @__PURE__ */ new Set(), cardIds = new Set(cards.cards.map((c) => c.id));
+  const decks = decksRaw.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) fail2("\u5361\u7EC4\u6570\u636E\u635F\u574F");
+    const o = value;
+    const id = own(o, "id"), name = own(o, "name"), members = own(o, "cardIds"), createdAt = own(o, "createdAt"), updatedAt = own(o, "updatedAt"), revision = own(o, "revision");
+    if (typeof id !== "string" || !id || id.length > 256 || ids.has(id)) fail2("\u5361\u7EC4\u7F16\u53F7\u91CD\u590D\u6216\u635F\u574F");
+    ids.add(id);
+    if (typeof name !== "string" || !name.trim() || name.length > 100) fail2("\u5361\u7EC4\u540D\u79F0\u635F\u574F");
+    if (!Array.isArray(members) || new Set(members).size !== members.length || members.some((x) => typeof x !== "string" || !cardIds.has(x))) fail2("\u5361\u7EC4\u5361\u7247\u5173\u8054\u635F\u574F");
+    for (const n of [createdAt, updatedAt, revision]) if (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0) fail2("\u5361\u7EC4\u65F6\u95F4\u6216\u7248\u672C\u635F\u574F");
+    return { id, name, cardIds: [...members], createdAt, updatedAt, revision };
+  });
+  if (!ids.has(DEFAULT_DECK)) fail2("\u7F3A\u5C11\u9ED8\u8BA4\u5361\u7EC4");
+  return { ...cards, ...preference, format: "passage-practice-vault", storageVersion: cards.version === 3 || algorithm || own(object, "storageVersion") === 2 ? 2 : 1, decks };
+}
 
 // src/practice-location.ts
 function parseLocations(raw) {
@@ -67,7 +2644,7 @@ var LocationStore = class {
 };
 
 // src/markdown-preview.ts
-var import_obsidian = require("obsidian");
+var import_obsidian2 = require("obsidian");
 
 // node_modules/entities/dist/esm/generated/decode-data-html.js
 var htmlDecodeTree = /* @__PURE__ */ new Uint16Array(
@@ -803,7 +3380,7 @@ function readDestination(text2, start) {
 }
 
 // src/markdown-preview.ts
-var PreviewOwner = class extends import_obsidian.Component {
+var PreviewOwner = class extends import_obsidian2.Component {
   constructor() {
     super(...arguments);
     __publicField(this, "disposed", false);
@@ -861,12 +3438,12 @@ var MarkdownPreviewScope = class {
       try {
         const link = decodeURIComponent(path.split("#")[0]);
         const file = this.app.metadataCache.getFirstLinkpathDest(link, sourcePath);
-        return file instanceof import_obsidian.TFile && /^(png|jpe?g|gif|webp|avif|bmp)$/i.test(file.extension) ? this.app.vault.getResourcePath(file) : null;
+        return file instanceof import_obsidian2.TFile && /^(png|jpe?g|gif|webp|avif|bmp)$/i.test(file.extension) ? this.app.vault.getResourcePath(file) : null;
       } catch (e) {
         return null;
       }
     } });
-    void import_obsidian.MarkdownRenderer.render(this.app, safe, staging, sourcePath, owner).then(() => {
+    void import_obsidian2.MarkdownRenderer.render(this.app, safe, staging, sourcePath, owner).then(() => {
       if (!current) {
         owner.unload();
         staging.replaceChildren();
@@ -912,7 +3489,7 @@ var MarkdownPreviewScope = class {
 };
 
 // src/main.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/core.ts
 var Session = class {
@@ -1331,146 +3908,6 @@ function sameCard(a, b) {
   return a.id === b.id && a.revision === b.revision && a.front === b.front && a.back === b.back && a.sourcePath === b.sourcePath && a.suspended === b.suspended;
 }
 
-// src/cards.ts
-var DAY_MS = 24 * 60 * 60 * 1e3;
-var AGAIN_MS = 10 * 60 * 1e3;
-var MAX_INTERVAL_DAYS = 365;
-var MAX_FRONT_LENGTH = 4e3;
-var MAX_BACK_LENGTH = 5e4;
-var MAX_DATE_MS = 864e13;
-var MAX_ID_LENGTH = 256;
-var MAX_SOURCE_PATH_LENGTH = 4096;
-var CardValidationError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "CardValidationError";
-  }
-};
-function fail(message) {
-  throw new CardValidationError(message);
-}
-function isRecord(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-function field(value, key, label2 = key) {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (!descriptor || !("value" in descriptor)) fail(`Missing or invalid ${label2}.`);
-  return descriptor.value;
-}
-function text(value, label2, maximum, allowEmpty = false) {
-  if (typeof value !== "string" || value.length > maximum || !allowEmpty && !value.trim()) {
-    fail(`${label2} must be ${allowEmpty ? "text" : "nonblank text"} of at most ${maximum} characters.`);
-  }
-  return value;
-}
-function timestamp(value, label2) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > MAX_DATE_MS) {
-    fail(`${label2} must be a valid nonnegative millisecond timestamp.`);
-  }
-  return value;
-}
-function integer(value, label2, maximum = Number.MAX_SAFE_INTEGER) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || value > maximum) {
-    fail(`${label2} must be an integer between 0 and ${maximum}.`);
-  }
-  return value;
-}
-function boolean(value, label2) {
-  if (typeof value !== "boolean") fail(`${label2} must be true or false.`);
-  return value;
-}
-function normalizeCard(raw, label2) {
-  if (!isRecord(raw)) fail(`${label2} must be a card object.`);
-  const get = (key) => field(raw, key, `${label2}.${key}`);
-  const lastReviewedAt = get("lastReviewedAt");
-  const ref = Object.getOwnPropertyDescriptor(raw, "sourceRef");
-  let sourceRef;
-  if (ref) {
-    if (!("value" in ref) || !isRecord(ref.value)) fail("Invalid source evidence");
-    const r = ref.value;
-    sourceRef = { line: integer(field(r, "line"), "source line"), endLine: integer(field(r, "endLine"), "source end line"), heading: text(field(r, "heading"), "source heading", 4e3, true), excerpt: text(field(r, "excerpt"), "source excerpt", 5e4), fingerprint: text(field(r, "fingerprint"), "source fingerprint", 100) };
-    if (sourceRef.endLine < sourceRef.line) fail("Invalid source line range");
-  }
-  return {
-    ...sourceRef ? { sourceRef } : {},
-    id: text(get("id"), `${label2}.id`, MAX_ID_LENGTH),
-    front: text(get("front"), `${label2}.front`, MAX_FRONT_LENGTH),
-    back: text(get("back"), `${label2}.back`, MAX_BACK_LENGTH),
-    sourcePath: text(get("sourcePath"), `${label2}.sourcePath`, MAX_SOURCE_PATH_LENGTH, true),
-    createdAt: timestamp(get("createdAt"), `${label2}.createdAt`),
-    updatedAt: timestamp(get("updatedAt"), `${label2}.updatedAt`),
-    dueAt: timestamp(get("dueAt"), `${label2}.dueAt`),
-    intervalDays: integer(get("intervalDays"), `${label2}.intervalDays`, MAX_INTERVAL_DAYS),
-    reviews: integer(get("reviews"), `${label2}.reviews`),
-    lapses: integer(get("lapses"), `${label2}.lapses`),
-    suspended: boolean(get("suspended"), `${label2}.suspended`),
-    lastReviewedAt: lastReviewedAt === null ? null : timestamp(lastReviewedAt, `${label2}.lastReviewedAt`),
-    revision: integer(get("revision"), `${label2}.revision`)
-  };
-}
-function normalizeData(raw, now) {
-  timestamp(now, "Current time");
-  if (raw === null || raw === void 0) return { version: 2, cards: [] };
-  if (!isRecord(raw)) fail("Saved flashcard data must be an object.");
-  if (Reflect.ownKeys(raw).length === 0) return { version: 2, cards: [] };
-  const version = field(raw, "version", "flashcard data version");
-  if (version !== 2) fail("Unsupported flashcard data version. Keep this data read-only and use a compatible plugin version.");
-  const savedCards = field(raw, "cards", "flashcard cards array");
-  if (!Array.isArray(savedCards)) fail("Saved flashcard cards must be an array.");
-  const cards = [];
-  const ids = /* @__PURE__ */ new Set();
-  for (let index = 0; index < savedCards.length; index++) {
-    const card = normalizeCard(field(savedCards, String(index), `card ${index + 1}`), `Card ${index + 1}`);
-    if (ids.has(card.id)) fail(`Duplicate flashcard ID in card ${index + 1}.`);
-    ids.add(card.id);
-    cards.push(card);
-  }
-  return { version: 2, cards };
-}
-function createCard(front, back, sourcePath, now, id) {
-  const createdAt = timestamp(now, "Current time");
-  return {
-    id: text(id, "Card ID", MAX_ID_LENGTH),
-    front: text(front, "Card front", MAX_FRONT_LENGTH),
-    back: text(back, "Card back", MAX_BACK_LENGTH),
-    sourcePath: text(sourcePath, "Source path", MAX_SOURCE_PATH_LENGTH, true),
-    createdAt,
-    updatedAt: createdAt,
-    dueAt: createdAt,
-    intervalDays: 0,
-    reviews: 0,
-    lapses: 0,
-    suspended: false,
-    lastReviewedAt: null,
-    revision: 0
-  };
-}
-function applyRating(card, rating, now) {
-  const current = normalizeCard(card, "Card");
-  const reviewedAt = timestamp(now, "Review time");
-  if (rating !== "again" && rating !== "hard" && rating !== "good" && rating !== "easy") fail("Unknown flashcard rating.");
-  const minimum = rating === "hard" ? 1 : rating === "good" ? 3 : 5;
-  const multiplier = rating === "hard" ? 1.2 : rating === "good" ? 2 : 3;
-  const intervalDays = rating === "again" ? 0 : Math.min(MAX_INTERVAL_DAYS, Math.max(minimum, Math.ceil(current.intervalDays * multiplier)));
-  const dueAt = timestamp(reviewedAt + (rating === "again" ? AGAIN_MS : intervalDays * DAY_MS), "Next due time");
-  return {
-    ...current,
-    updatedAt: reviewedAt,
-    dueAt,
-    intervalDays,
-    reviews: integer(current.reviews + 1, "Review count"),
-    lapses: integer(current.lapses + (rating === "again" ? 1 : 0), "Lapse count"),
-    lastReviewedAt: reviewedAt,
-    revision: integer(current.revision + 1, "Revision")
-  };
-}
-function dueCards(cards, now) {
-  timestamp(now, "Current time");
-  return cards.filter((card) => !card.suspended && card.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-}
-
 // src/knowledge.ts
 var EXTRACTOR_VERSION = 3;
 var MAX_NOTE_BYTES = 2 * 1024 * 1024;
@@ -1673,11 +4110,53 @@ function uniqueKnowledge(points) {
 }
 
 // src/backup.ts
-function exportBackup(cards, now = Date.now()) {
-  return JSON.stringify({ format: "passage-practice-backup", formatVersion: 1, pluginVersion: "1.0.0", exportedAt: new Date(now).toISOString(), data: normalizeData({ version: 2, cards }, now) }, null, 2);
+var MAX_BACKUP_BYTES = 10 * 1024 * 1024;
+function assertBackupSize(text2, exporting = false) {
+  if (text2.length > MAX_BACKUP_BYTES || new TextEncoder().encode(text2).byteLength > MAX_BACKUP_BYTES) {
+    throw new Error(exporting ? "\u5907\u4EFD\u8D85\u8FC7 10 MiB\uFF0C\u672A\u751F\u6210 JSON \u5907\u4EFD\u3002\u8BF7\u5B8C\u6574\u5907\u4EFD\u77E5\u8BC6\u5E93\u6587\u4EF6\u4EE5\u4FDD\u7559\u5168\u90E8\u6570\u636E" : "\u5907\u4EFD\u8D85\u8FC7 10 MiB\uFF08UTF-8\uFF09\uFF0C\u8BF7\u5148\u68C0\u67E5\u6587\u4EF6");
+  }
+}
+function fitsBackup(text2) {
+  return text2.length <= MAX_BACKUP_BYTES && new TextEncoder().encode(text2).byteLength <= MAX_BACKUP_BYTES;
+}
+function serializeBackup(data, now, part) {
+  return JSON.stringify({ format: "passage-practice-backup", formatVersion: "decks" in data ? 2 : 1, pluginVersion: "1.5.1", exportedAt: new Date(now).toISOString(), ...part ? { part } : {}, data }, null, 2);
+}
+function backupData(input, now) {
+  return Array.isArray(input) ? normalizeData({ version: 2, cards: input }, now) : normalizeStudyData(input, now);
+}
+function exportBackupParts(input, now = Date.now()) {
+  const data = backupData(input, now), single = serializeBackup(data, now);
+  if (fitsBackup(single)) return [single];
+  const id = crypto.randomUUID(), parts = [];
+  const reserve = { id, index: Number.MAX_SAFE_INTEGER, total: Number.MAX_SAFE_INTEGER };
+  const partition = (cards) => {
+    const ids = new Set(cards.map((card) => card.id));
+    const subset = "decks" in data ? { ...data, cards, decks: data.decks.map((deck) => ({ ...deck, cardIds: deck.cardIds.filter((cardId) => ids.has(cardId)) })) } : { ...data, cards };
+    if (fitsBackup(serializeBackup(subset, now, reserve))) {
+      parts.push(subset);
+      if (parts.length > 1e4) throw new Error("\u5907\u4EFD\u9700\u8981\u8D85\u8FC7 10000 \u4E2A\u5206\u5377\uFF0C\u672A\u751F\u6210\u5907\u4EFD\uFF1B\u8BF7\u5B8C\u6574\u5907\u4EFD\u77E5\u8BC6\u5E93\u6587\u4EF6");
+      return;
+    }
+    if (cards.length <= 1) throw new Error("\u5355\u5F20\u5361\u7247\u53CA\u5176\u590D\u4E60\u8BB0\u5F55\u6216\u5361\u7EC4\u5B9A\u4E49\u8D85\u8FC7 10 MiB\uFF0C\u65E0\u6CD5\u5206\u5377\uFF0C\u672A\u751F\u6210\u5907\u4EFD\uFF1B\u8BF7\u5B8C\u6574\u5907\u4EFD\u77E5\u8BC6\u5E93\u6587\u4EF6");
+    const middle = Math.ceil(cards.length / 2);
+    partition(cards.slice(0, middle));
+    partition(cards.slice(middle));
+  };
+  partition(data.cards);
+  return parts.map((part, index) => {
+    const text2 = serializeBackup(part, now, { id, index: index + 1, total: parts.length });
+    assertBackupSize(text2, true);
+    return text2;
+  });
+}
+function parsePart(raw) {
+  if (raw === void 0) return;
+  if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id || raw.id.length > 128 || !Number.isSafeInteger(raw.index) || !Number.isSafeInteger(raw.total) || raw.index < 1 || raw.total < 1 || raw.total > 1e4 || raw.index > raw.total) throw new Error("\u5907\u4EFD\u5206\u5377\u4FE1\u606F\u635F\u574F");
+  return { id: raw.id, index: raw.index, total: raw.total };
 }
 function parseBackup(text2, now = Date.now()) {
-  if (text2.length > 10 * 1024 * 1024) throw new Error("\u5907\u4EFD\u8D85\u8FC7 10 MiB\uFF0C\u8BF7\u5148\u68C0\u67E5\u6587\u4EF6");
+  assertBackupSize(text2);
   let raw;
   try {
     raw = JSON.parse(text2);
@@ -1685,16 +4164,23 @@ function parseBackup(text2, now = Date.now()) {
     throw new Error("\u4E0D\u662F\u6709\u6548\u7684 JSON \u5907\u4EFD\u6587\u4EF6");
   }
   if ((raw == null ? void 0 : raw.format) === "passage-practice-backup") {
-    if (raw.formatVersion !== 1) throw new Error("\u4E0D\u652F\u6301\u7684\u5907\u4EFD\u7248\u672C");
-    return normalizeData(raw.data, now);
+    if (raw.formatVersion !== 1 && raw.formatVersion !== 2) throw new Error("\u4E0D\u652F\u6301\u7684\u5907\u4EFD\u7248\u672C");
+    const backupPart = parsePart(raw.part);
+    const data = raw.formatVersion === 2 ? normalizeStudyData(raw.data, now) : normalizeData(raw.data, now);
+    return backupPart ? { ...data, backupPart } : data;
   }
-  return normalizeData(raw, now);
+  return (raw == null ? void 0 : raw.format) === "passage-practice-vault" ? normalizeStudyData(raw, now) : normalizeData(raw, now);
 }
 function deckFingerprint(cards) {
   return fingerprint(JSON.stringify(cards));
 }
-function planImport(current, incoming) {
-  const byId = new Map(current.map((c) => [c.id, c])), contents = new Set(current.map((c) => JSON.stringify([c.front, c.back, c.sourcePath]))), add = [], conflicts = [];
+function planImport(current, incoming, choice) {
+  var _a2;
+  if (choice !== void 0 && choice !== "keep-local" && choice !== "use-backup") throw new Error("\u8BF7\u9009\u62E9\u4FDD\u7559\u672C\u5730\u7B97\u6CD5\u6216\u4F7F\u7528\u5907\u4EFD\u7B97\u6CD5");
+  const full = !Array.isArray(current), local = full ? current.cards : current;
+  const localData = full ? current : void 0, defaultDeck = localData == null ? void 0 : localData.decks[0];
+  const empty = !!localData && local.length === 0 && localData.schedulingAlgorithm === void 0 && localData.decks.length === 1 && (defaultDeck == null ? void 0 : defaultDeck.id) === DEFAULT_DECK && defaultDeck.name === "\u9ED8\u8BA4\u5361\u7EC4" && defaultDeck.revision === 0 && defaultDeck.createdAt === defaultDeck.updatedAt;
+  const byId = new Map(local.map((c) => [c.id, c])), contents = new Set(local.map((c) => JSON.stringify([c.front, c.back, c.sourcePath]))), add = [], conflicts = [];
   let identical = 0, duplicates = 0;
   for (const card of incoming.cards) {
     const existing = byId.get(card.id);
@@ -1708,20 +4194,70 @@ function planImport(current, incoming) {
       duplicates++;
       continue;
     }
-    add.push({ ...card, ...card.sourceRef ? { sourceRef: { ...card.sourceRef } } : {} });
+    add.push(structuredClone(card));
     contents.add(key);
   }
-  return { incoming, add, identical, duplicates, conflicts, base: deckFingerprint(current) };
+  const plan = { incoming: structuredClone(incoming), add, identical, duplicates, conflicts, base: deckFingerprint(current), requiresAlgorithmChoice: false, ...incoming.backupPart ? { backupPart: { ...incoming.backupPart } } : {}, ...full ? { decks: [], deckConflicts: [], deckMemberships: [] } : {} };
+  if (full) {
+    const data = current;
+    plan.localSchedulingAlgorithm = (_a2 = data.schedulingAlgorithm) != null ? _a2 : "fsrs";
+    plan.savedSchedulingAlgorithm = "decks" in incoming ? incoming.schedulingAlgorithm : void 0;
+    if (plan.savedSchedulingAlgorithm) {
+      plan.algorithmChoice = choice != null ? choice : empty ? "use-backup" : void 0;
+      plan.requiresAlgorithmChoice = plan.algorithmChoice === void 0;
+      if (plan.algorithmChoice) plan.schedulingAlgorithm = plan.algorithmChoice === "use-backup" ? plan.savedSchedulingAlgorithm : plan.localSchedulingAlgorithm;
+    } else {
+      if (choice === "use-backup") throw new Error("\u6B64\u5907\u4EFD\u672A\u4FDD\u5B58\u7B97\u6CD5\u504F\u597D\uFF0C\u8BF7\u4FDD\u7559\u672C\u5730\u7B97\u6CD5");
+      plan.algorithmChoice = "keep-local";
+      plan.schedulingAlgorithm = plan.localSchedulingAlgorithm;
+    }
+  } else if (choice === "use-backup") {
+    throw new Error("\u6062\u590D\u7B97\u6CD5\u504F\u597D\u9700\u8981\u5B8C\u6574\u7684\u672C\u5730\u6570\u636E\uFF0C\u8BF7\u91CD\u65B0\u9884\u89C8\u5907\u4EFD");
+  }
+  if (full && "decks" in incoming) {
+    const localDecks = current.decks, available = new Set([...local, ...add].map((c) => c.id));
+    for (const deck of incoming.decks) {
+      const existing = localDecks.find((d) => d.id === deck.id || d.name === deck.name);
+      if (existing) {
+        if ((incoming.backupPart || empty) && existing.id === deck.id && existing.name === deck.name) {
+          const members = new Set(existing.cardIds), missing = deck.cardIds.filter((id) => available.has(id) && !members.has(id));
+          if (missing.length) plan.deckMemberships.push({ id: existing.id, cardIds: missing });
+          if (existing.id !== DEFAULT_DECK && JSON.stringify({ ...existing, cardIds: [] }) !== JSON.stringify({ ...deck, cardIds: [] })) plan.deckConflicts.push(deck.name);
+        } else if (JSON.stringify(existing) !== JSON.stringify(deck)) plan.deckConflicts.push(deck.name);
+        continue;
+      }
+      plan.decks.push({ ...structuredClone(deck), cardIds: deck.cardIds.filter((id) => available.has(id)) });
+    }
+  }
+  return plan;
 }
 
 // src/card-store.ts
-var copy = (card) => ({ ...card, ...card.sourceRef ? { sourceRef: { ...card.sourceRef } } : {} });
+var copy = (card) => structuredClone(card);
 var CardStore = class {
   constructor(raw, persist, now = Date.now()) {
     this.persist = persist;
     __publicField(this, "state");
     __publicField(this, "pending", Promise.resolve());
-    this.state = normalizeData(raw, now);
+    this.state = normalizeStudyData(raw, now);
+  }
+  get data() {
+    return structuredClone(this.state);
+  }
+  get schedulingAlgorithm() {
+    var _a2;
+    return (_a2 = this.state.schedulingAlgorithm) != null ? _a2 : "fsrs";
+  }
+  setSchedulingAlgorithm(algorithm) {
+    return this.transact((_cards, data) => {
+      if (algorithm !== "fsrs" && algorithm !== "sm2-osr") throw new Error("\u4E0D\u652F\u6301\u7684\u7B97\u6CD5");
+      data.schedulingAlgorithm = algorithm;
+      data.version = 3;
+      data.storageVersion = 2;
+    });
+  }
+  get decks() {
+    return structuredClone(this.state.decks);
   }
   get cards() {
     return this.state.cards.map(copy);
@@ -1730,11 +4266,14 @@ var CardStore = class {
     const c = this.state.cards.find((c2) => c2.id === id);
     return c ? copy(c) : void 0;
   }
-  transact(edit, beforeCommit) {
+  transact(edit, beforeCommit, assignUnclaimed = true) {
     const work = this.pending.then(async () => {
-      const next = this.state.cards.map(copy);
-      const result = edit(next);
-      const data = normalizeData({ version: 2, cards: next }, Date.now());
+      const draft = structuredClone(this.state), next = draft.cards;
+      const oldIds = new Set(next.map((c) => c.id));
+      const result = edit(next, draft);
+      const defaultDeck = draft.decks.find((d) => d.id === DEFAULT_DECK);
+      for (const card of next) if (assignUnclaimed && !oldIds.has(card.id) && draft.decks.every((d) => !d.cardIds.includes(card.id))) defaultDeck.cardIds.push(card.id);
+      const data = normalizeStudyData(draft, Date.now());
       beforeCommit == null ? void 0 : beforeCommit();
       await this.persist(data);
       this.state = data;
@@ -1745,9 +4284,11 @@ var CardStore = class {
     return work;
   }
   /** One atomic persistence for an explicitly reviewed batch; duplicates are skipped. */
-  addMany(seeds, now = Date.now(), beforeCommit) {
+  addMany(seeds, now = Date.now(), beforeCommit, deckId = DEFAULT_DECK) {
     if (!seeds.length || seeds.length > 100) throw new Error("\u6BCF\u6279\u8BF7\u9009\u62E9 1 \u81F3 100 \u6761\u5019\u9009");
-    return this.transact((cards) => {
+    seeds = structuredClone(seeds);
+    return this.transact((cards, data) => {
+      const deck = this.requireDeck(data, deckId);
       let added = 0, duplicates = 0;
       const keys = new Set(cards.map((c) => JSON.stringify([c.front, c.back, c.sourcePath])));
       for (const seed of seeds) {
@@ -1756,8 +4297,9 @@ var CardStore = class {
           duplicates++;
           continue;
         }
-        if (seed.sourceRef) card.sourceRef = { ...seed.sourceRef };
+        if (seed.sourceRef) card.sourceRef = structuredClone(seed.sourceRef);
         cards.push(card);
+        deck.cardIds.push(card.id);
         keys.add(key);
         added++;
       }
@@ -1765,12 +4307,24 @@ var CardStore = class {
     }, beforeCommit);
   }
   importBackup(plan) {
-    return this.transact((cards) => {
-      if (deckFingerprint(cards) !== plan.base) throw new Error("\u672C\u5730\u5361\u7247\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9884\u89C8\u5907\u4EFD");
-      const latest = planImport(cards, plan.incoming);
+    return this.transact((cards, data) => {
+      const current = plan.decks !== void 0 ? data : cards;
+      if (deckFingerprint(current) !== plan.base) throw new Error("\u672C\u5730\u5361\u7247\u6216\u5361\u7EC4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9884\u89C8\u5907\u4EFD");
+      const latest = planImport(current, plan.incoming, plan.algorithmChoice);
+      if (latest.requiresAlgorithmChoice) throw new Error("\u8BF7\u9009\u62E9\u6062\u590D\u540E\u4F7F\u7528\u7684\u590D\u4E60\u7B97\u6CD5");
       cards.push(...latest.add);
+      if (latest.decks) data.decks.push(...latest.decks);
+      for (const membership of latest.deckMemberships || []) {
+        const deck = this.requireDeck(data, membership.id);
+        deck.cardIds = [.../* @__PURE__ */ new Set([...deck.cardIds, ...membership.cardIds])];
+      }
+      if (latest.algorithmChoice === "use-backup" && latest.schedulingAlgorithm) {
+        data.schedulingAlgorithm = latest.schedulingAlgorithm;
+        data.version = 3;
+        data.storageVersion = 2;
+      }
       return latest.add.length;
-    });
+    }, void 0, !("decks" in plan.incoming));
   }
   /** All selected identities must still match; failure never publishes a partial deck. */
   suspendMany(selected, suspended, now = Date.now(), beforeCommit) {
@@ -1808,7 +4362,7 @@ var CardStore = class {
       if (i >= 0 && cards[i].revision !== card.revision) throw new Error("\u5361\u7247\u5DF2\u6539\u53D8\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
       if (i < 0 && card.reviews !== 0) throw new Error("\u590D\u4E60\u8BB0\u5F55\u5DF2\u6539\u53D8");
       if (card.suspended) throw new Error("\u5361\u7247\u5DF2\u6682\u505C");
-      const next = applyRating(card, rating, now);
+      const next = applyRating(card, rating, now, this.schedulingAlgorithm, srHistogram(cards, now));
       if (i < 0) cards.push(next);
       else cards[i] = next;
       return copy(next);
@@ -1822,44 +4376,129 @@ var CardStore = class {
       }
     });
   }
-  add(front, back, sourcePath, now = Date.now()) {
-    return this.transact((cards) => {
+  add(front, back, sourcePath, now = Date.now(), deckId = DEFAULT_DECK, sourceRef) {
+    sourceRef = sourceRef ? structuredClone(sourceRef) : void 0;
+    return this.transact((cards, data) => {
+      const deck = this.requireDeck(data, deckId);
       const duplicate = cards.find((c) => c.front === front && c.back === back && c.sourcePath === sourcePath);
       if (duplicate) throw new Error("\u76F8\u540C\u9898\u76EE\u4E0E\u7B54\u6848\u7684\u5361\u7247\u5DF2\u5B58\u5728\uFF0C\u53EF\u5728\u5361\u7247\u5E93\u7F16\u8F91\u6216\u6062\u590D\u3002");
       const card = createCard(front, back, sourcePath, now, crypto.randomUUID());
+      if (sourceRef) card.sourceRef = structuredClone(sourceRef);
       cards.push(card);
-      return { ...card };
+      deck.cardIds.push(card.id);
+      return copy(card);
     });
   }
   edit(id, revision, front, back, now = Date.now(), relearn = false) {
     return this.transact((cards) => {
       const i = this.index(cards, id, revision), old = cards[i];
       const content = createCard(front, back, old.sourcePath, now, old.id);
-      cards[i] = { ...old, front: content.front, back: content.back, ...relearn ? { dueAt: now, intervalDays: 0, suspended: false } : {}, updatedAt: now, revision: old.revision + 1 };
-      return { ...cards[i] };
+      cards[i] = { ...relearn ? resetScheduling(old, now) : old, front: content.front, back: content.back, updatedAt: now, revision: old.revision + 1 };
+      return copy(cards[i]);
     });
   }
   rate(id, revision, rating, now = Date.now()) {
     return this.transact((cards) => {
       const i = this.index(cards, id, revision);
       if (cards[i].suspended) throw new Error("\u5361\u7247\u5DF2\u6682\u505C\uFF0C\u8BF7\u5237\u65B0\u961F\u5217\u3002");
-      cards[i] = applyRating(cards[i], rating, now);
-      return { ...cards[i] };
+      cards[i] = applyRating(cards[i], rating, now, this.schedulingAlgorithm, srHistogram(cards, now));
+      return copy(cards[i]);
     });
   }
   suspend(id, revision, suspended, now = Date.now()) {
     return this.transact((cards) => {
       const i = this.index(cards, id, revision);
       cards[i] = { ...cards[i], suspended, updatedAt: now, revision: cards[i].revision + 1 };
-      return { ...cards[i] };
+      return copy(cards[i]);
     });
   }
   restoreRating(previous, expectedRevision, now = Date.now()) {
     return this.transact((cards) => {
       const i = this.index(cards, previous.id, expectedRevision);
       cards[i] = { ...previous, updatedAt: now, revision: expectedRevision + 1 };
-      return { ...cards[i] };
+      return copy(cards[i]);
     });
+  }
+  createDeck(name, selected = [], now = Date.now()) {
+    const snapshots = selected.map(copy);
+    return this.transact((cards, data) => {
+      name = name.trim();
+      if (!name || name.length > 100) throw new Error("\u5361\u7EC4\u540D\u79F0\u9700\u4E3A 1 \u81F3 100 \u4E2A\u5B57\u7B26");
+      if (data.decks.some((d) => d.name === name)) throw new Error("\u540C\u540D\u5361\u7EC4\u5DF2\u5B58\u5728");
+      this.materialize(cards, snapshots);
+      const deck = { id: crypto.randomUUID(), name, cardIds: snapshots.map((c) => c.id), createdAt: now, updatedAt: now, revision: 0 };
+      data.decks.push(deck);
+      return structuredClone(deck);
+    });
+  }
+  assignDeck(deckId, selected, now = Date.now()) {
+    const snapshots = selected.map(copy);
+    return this.transact((cards, data) => {
+      const deck = data.decks.find((d) => d.id === deckId);
+      if (!deck) throw new Error("\u5361\u7EC4\u4E0D\u5B58\u5728");
+      this.materialize(cards, snapshots);
+      let added = 0;
+      for (const c of snapshots) if (!deck.cardIds.includes(c.id)) {
+        deck.cardIds.push(c.id);
+        added++;
+      }
+      deck.updatedAt = now;
+      deck.revision++;
+      return added;
+    });
+  }
+  renameDeck(id, revision, name, now = Date.now()) {
+    return this.transact((_cards, data) => {
+      const deck = this.requireDeck(data, id);
+      if (deck.revision !== revision) throw new Error("\u5361\u7EC4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9");
+      name = name.trim();
+      if (!name || name.length > 100) throw new Error("\u5361\u7EC4\u540D\u79F0\u9700\u4E3A 1 \u81F3 100 \u4E2A\u5B57\u7B26");
+      if (data.decks.some((d) => d.id !== id && d.name === name)) throw new Error("\u540C\u540D\u5361\u7EC4\u5DF2\u5B58\u5728");
+      deck.name = name;
+      deck.revision++;
+      deck.updatedAt = now;
+    });
+  }
+  removeFromDeck(id, revision, selected, now = Date.now()) {
+    const snapshots = selected.map(copy);
+    return this.transact((cards, data) => {
+      const deck = this.requireDeck(data, id);
+      if (deck.revision !== revision) throw new Error("\u5361\u7EC4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9");
+      for (const c of snapshots) {
+        const old = cards.find((x) => x.id === c.id);
+        if (!old || !sameCard(old, c)) throw new Error("\u6240\u9009\u5361\u7247\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9");
+      }
+      const ids = new Set(snapshots.map((c) => c.id)), count = deck.cardIds.filter((x) => ids.has(x)).length;
+      deck.cardIds = deck.cardIds.filter((x) => !ids.has(x));
+      deck.revision++;
+      deck.updatedAt = now;
+      return count;
+    });
+  }
+  deleteEmptyDeck(id, revision) {
+    return this.transact((_cards, data) => {
+      const deck = this.requireDeck(data, id);
+      if (id === DEFAULT_DECK) throw new Error("\u9ED8\u8BA4\u5361\u7EC4\u4E0D\u80FD\u5220\u9664");
+      if (deck.revision !== revision) throw new Error("\u5361\u7EC4\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u6838\u5BF9");
+      if (deck.cardIds.length) throw new Error("\u53EA\u80FD\u5220\u9664\u7A7A\u5361\u7EC4\uFF0C\u8BF7\u5148\u79FB\u51FA\u5361\u7247");
+      data.decks = data.decks.filter((d) => d.id !== id);
+    });
+  }
+  requireDeck(data, id) {
+    const deck = data.decks.find((d) => d.id === id);
+    if (!deck) throw new Error("\u5361\u7EC4\u4E0D\u5B58\u5728\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
+    return deck;
+  }
+  materialize(cards, selected) {
+    if (selected.length > 1e4 || new Set(selected.map((c) => c.id)).size !== selected.length) throw new Error("\u5361\u7247\u9009\u62E9\u65E0\u6548");
+    for (const c of selected) {
+      const old = cards.find((x) => x.id === c.id);
+      if (old && !sameCard(old, c)) throw new Error("\u6240\u9009\u5361\u7247\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
+      if (!old) {
+        if (!c.id.startsWith("note:") || c.reviews !== 0) throw new Error("\u5361\u7247\u5DF2\u79FB\u9664");
+        cards.push(copy(c));
+      }
+    }
   }
   index(cards, id, revision) {
     const i = cards.findIndex((c) => c.id === id);
@@ -1869,101 +4508,21 @@ var CardStore = class {
   }
 };
 
-// src/study-health.ts
-function studyStats(cards, now) {
-  const midnight = new Date(now);
-  midnight.setHours(0, 0, 0, 0);
-  return { active: cards.filter((c) => !c.suspended).length, new: cards.filter((c) => !c.suspended && c.reviews === 0).length, reviewed: cards.filter((c) => c.reviews > 0).length, paused: cards.filter((c) => c.suspended).length, today: cards.filter((c) => c.lastReviewedAt !== null && c.lastReviewedAt >= midnight.getTime() && c.lastReviewedAt <= now).length, due: cards.filter((c) => !c.suspended && c.dueAt <= now).length, nextWeek: cards.filter((c) => !c.suspended && c.dueAt > now && c.dueAt <= now + 7 * DAY_MS).length };
-}
-function locateEvidence(text2, excerpt) {
-  const normalized = text2.replace(/\r\n/g, "\n"), index = normalized.indexOf(excerpt);
-  return index < 0 ? { status: "changed", line: 0 } : { status: "present", line: normalized.slice(0, index).split("\n").length - 1 };
-}
-
-// src/cloze.ts
-function protectedSpans(text2) {
-  const spans = [];
-  let offset = 0, fence = "", size = 0, begin = 0;
-  for (const row of text2.split("\n")) {
-    const f = row.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (!fence && f) {
-      fence = f[1][0];
-      size = f[1].length;
-      begin = offset;
-    } else if (fence && f && f[1][0] === fence && f[1].length >= size && !f[2].trim()) {
-      spans.push([begin, offset + row.length]);
-      fence = "";
-    }
-    offset += row.length + 1;
+// src/review-order.ts
+function sessionOrder(items, order, random = Math.random) {
+  const result = [...items];
+  if (order === "random") for (let i = result.length - 1; i > 0; i--) {
+    const n = random();
+    if (!Number.isFinite(n) || n < 0 || n >= 1) throw new Error("Invalid shuffle source");
+    const j = Math.floor(n * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
   }
-  if (fence) spans.push([begin, text2.length]);
-  const patterns = [/(`+)[\s\S]*?\1/g, /\$\$[\s\S]*?\$\$/g, /(?<!\\)\$(?:\\.|[^$\n])+?(?<!\\)\$/g, /\\\([\s\S]*?\\\)/g, /\\\[[\s\S]*?\\\]/g, /<!--(?:[\s\S]*?-->|[\s\S]*$)/g];
-  for (const pattern of patterns) for (const match of text2.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
-  return spans;
+  return result;
 }
-function keywordSuggestions(text2) {
-  const spans = protectedSpans(text2), terms = [];
-  for (const m of text2.matchAll(/\*\*([^*\n]{1,60})\*\*/g)) {
-    if (!spans.some(([a, b]) => m.index < b && m.index + m[0].length > a) && !/[。！？.!?：:]/.test(m[1])) terms.push(m[1].trim());
-  }
-  return [...new Set(terms)].slice(0, 6);
+function sessionFrom(items, item, order) {
+  if (!items.includes(item)) throw new Error("Starting item is outside the selected scope");
+  return order === "random" ? { queue: [item, ...sessionOrder(items.filter((x) => x !== item), order)], position: 0 } : { queue: [...items], position: items.indexOf(item) };
 }
-function makeCloze(text2, keyword, heading = "\u5173\u952E\u8BCD\u56DE\u5FC6") {
-  const term = keyword.trim();
-  if (!term || term.length > 80 || /\n/.test(term)) throw new Error("\u8BF7\u8F93\u5165 1 \u81F3 80 \u5B57\u7B26\u7684\u5355\u884C\u5173\u952E\u8BCD");
-  const positions = [];
-  let i = 0;
-  while ((i = text2.indexOf(term, i)) >= 0) {
-    positions.push(i);
-    i += term.length;
-  }
-  if (!positions.length) throw new Error("\u539F\u6587\u4E2D\u6CA1\u6709\u5B8C\u5168\u76F8\u540C\u7684\u5173\u952E\u8BCD\uFF0C\u8BF7\u76F4\u63A5\u590D\u5236\u539F\u6587\u5B57\u8BCD");
-  const spans = protectedSpans(text2);
-  if (positions.some((i2) => spans.some(([a, b]) => i2 < b && i2 + term.length > a))) throw new Error("\u5173\u952E\u8BCD\u51FA\u73B0\u5728\u4EE3\u7801\u3001\u516C\u5F0F\u6216\u6CE8\u91CA\u4E2D\uFF0C\u8BF7\u9009\u62E9\u666E\u901A\u6B63\u6587\u91CC\u7684\u5173\u952E\u8BCD");
-  if (positions.length > 12) throw new Error("\u5173\u952E\u8BCD\u51FA\u73B0\u8D85\u8FC7 12 \u6B21\uFF0C\u8303\u56F4\u8FC7\u5BBD\uFF1B\u8BF7\u9009\u62E9\u66F4\u5177\u4F53\u7684\u8BCD");
-  let masked = text2;
-  for (const at of [...positions].reverse()) masked = masked.slice(0, at) + "\uFF3B\u2026\uFF3D" + masked.slice(at + term.length);
-  const safeHeading = heading.split(term).join("\uFF3B\u2026\uFF3D");
-  const front = `${safeHeading} \xB7 \u8865\u5168\u5173\u952E\u8BCD
-
-${masked}`;
-  if (front.length > 4e3) throw new Error("\u6316\u7A7A\u95EE\u9898\u8FC7\u957F\uFF0C\u8BF7\u9009\u62E9\u8F83\u77ED\u7684\u6BB5\u843D");
-  return { front, back: `\u5173\u952E\u8BCD\uFF1A${term}
-
-\u539F\u6587\uFF1A${text2}`, matches: positions.length };
-}
-
-// src/catalog.ts
-function excluded(path, entries) {
-  return entries.some((raw) => {
-    const value = raw.trim().replace(/^\/+|\/+$/g, "");
-    return !!value && (path === value || path.startsWith(value + "/"));
-  });
-}
-function parseExclusions(value) {
-  return [...new Set(value.split("\n").map((x) => x.trim().replace(/^\/+|\/+$/g, "")).filter((x) => x && !x.split("/").some((p) => p === "." || p === "..")))];
-}
-function paginate(items, page, size = 24) {
-  const pages = Math.max(1, Math.ceil(items.length / size)), current = Math.max(0, Math.min(Number.isFinite(page) ? Math.floor(page) : 0, pages - 1));
-  return { items: items.slice(current * size, (current + 1) * size), page: current, pages, total: items.length };
-}
-function matchesQuery(values, query) {
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean), haystack = values.join("\n").toLocaleLowerCase();
-  return terms.every((term) => haystack.includes(term));
-}
-function noteTags(native, frontmatter) {
-  const result = [...native];
-  const legacy = frontmatter == null ? void 0 : frontmatter.tag;
-  const values = typeof legacy === "string" ? legacy.split(/[,，]/) : Array.isArray(legacy) ? legacy : [];
-  for (const value of values) if (typeof value === "string") {
-    const tag = value.trim().replace(/^#+/, "");
-    if (tag && tag.length <= 200 && !/[\r\n]/.test(tag)) result.push("#" + tag);
-  }
-  return [...new Set(result)].sort();
-}
-
-// src/study-view.ts
-var import_obsidian2 = require("obsidian");
 
 // src/sections.ts
 function markdownStructure(text2) {
@@ -1994,10 +4553,10 @@ function markdownStructure(text2) {
     let out = "", i = 0;
     while (i < row.length) {
       if (comment) {
-        const token = comment === "html" ? "-->" : "%%", end = row.indexOf(token, i);
+        const token2 = comment === "html" ? "-->" : "%%", end = row.indexOf(token2, i);
         if (end < 0) return out + " ".repeat(row.length - i);
-        out += " ".repeat(end + token.length - i);
-        i = end + token.length;
+        out += " ".repeat(end + token2.length - i);
+        i = end + token2.length;
         comment = "";
       } else if (row[i] === "\\" && i + 1 < row.length) {
         out += row.slice(i, i + 2);
@@ -2172,10 +4731,10 @@ function parseOutline(text2, path, warnings = []) {
     let output = "", index = 0;
     while (index < row.length) {
       if (comment) {
-        const token = comment === "html" ? "-->" : "%%", end = row.indexOf(token, index);
+        const token2 = comment === "html" ? "-->" : "%%", end = row.indexOf(token2, index);
         if (end < 0) return output + " ".repeat(row.length - index);
-        output += " ".repeat(end + token.length - index);
-        index = end + token.length;
+        output += " ".repeat(end + token2.length - index);
+        index = end + token2.length;
         comment = "";
       } else if (row[index] === "\\" && index + 1 < row.length) {
         output += row.slice(index, index + 2);
@@ -2259,6 +4818,21 @@ function parseOutline(text2, path, warnings = []) {
 }
 
 // src/study-source.ts
+function selectionSourceRef(source, selectedText, path, line) {
+  var _a2;
+  const text2 = source.replace(/\r\n/g, "\n"), excerpt = selectedText.replace(/\r\n/g, "\n"), structure = markdownStructure(text2);
+  if (!excerpt.trim() || !Number.isInteger(line) || line < 0 || line >= structure.rows.length) throw new Error("\u9009\u6BB5\u6765\u6E90\u4F4D\u7F6E\u65E0\u6548\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u539F\u6587\u540E\u5236\u5361\u3002");
+  const offset = structure.rows.slice(0, line).reduce((sum, row) => sum + row.length + 1, 0), at = text2.indexOf(excerpt, offset);
+  if (at < offset || at > offset + structure.rows[line].length) throw new Error("\u9009\u6BB5\u4E0E\u6765\u6E90\u5185\u5BB9\u4E0D\u4E00\u81F4\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u539F\u6587\u540E\u5236\u5361\u3002");
+  const headingPath = ((_a2 = structure.headings.filter((heading) => heading.line <= line).at(-1)) == null ? void 0 : _a2.path) || [];
+  return { kind: "selection", line, endLine: line + excerpt.split("\n").length - 1, heading: headingPath.join(" \u203A ") || path.split("/").pop().replace(/\.md$/i, ""), headingPath: [...headingPath], excerpt, fingerprint: fingerprint(excerpt) };
+}
+function passageSourceRef(passage) {
+  var _a2, _b;
+  if (passage.sourceRef) return { ...passage.sourceRef, ...passage.sourceRef.headingPath ? { headingPath: [...passage.sourceRef.headingPath] } : {} };
+  const excerpt = passage.text.replace(/\r\n/g, "\n"), selection = passage.kind === "selection" || !passage.kind;
+  return { kind: selection ? "selection" : "passage", line: passage.line, endLine: selection ? passage.line + excerpt.split("\n").length - 1 : Math.max(passage.line, ((_a2 = passage.endLine) != null ? _a2 : passage.line + excerpt.split("\n").length) - 1), heading: ((_b = passage.headingPath) == null ? void 0 : _b.join(" \u203A ")) || passage.question, excerpt, fingerprint: fingerprint(excerpt), ...selection ? passage.headingPath ? { headingPath: [...passage.headingPath] } : {} : { question: passage.question, passageKind: passage.kind, headingPath: [...passage.headingPath || []] } };
+}
 function matchesScope(path, tags2, scope, current) {
   if (scope.kind === "all") return true;
   if (scope.kind === "current") return !!current && path === current;
@@ -2280,20 +4854,6 @@ function parseCardBlock(block, path = "", line = 0) {
   if (!front || !back) throw new Error("\u95EE\u9898\u548C\u7B54\u6848\u90FD\u9700\u8981\u586B\u5199");
   if (front.length > 4e3 || back.length > 5e4) throw new Error("\u95EE\u9898\u9650 4,000 \u5B57\u7B26\uFF1B\u7B54\u6848\u9650 50,000 \u5B57\u7B26");
   return { id: "note:" + id, front, back, sourcePath: path, line };
-}
-function cardMarkup(id, front, back) {
-  if (!/^[A-Za-z0-9_-]{6,100}$/.test(id)) throw new Error("Invalid card id");
-  if (front.replace(/\r\n/g, "\n").split("\n").some((line) => line.trim() === "\u7B54\u6848\uFF1A")) throw new Error("\u95EE\u9898\u4E2D\u4E0D\u80FD\u5355\u72EC\u4E00\u884C\u5199\u300C\u7B54\u6848\uFF1A\u300D\uFF1B\u5B83\u662F\u80CC\u9762\u5206\u9694\u6807\u8BB0\u3002\u8BF7\u628A\u8FD9\u51E0\u4E2A\u5B57\u653E\u5728\u53E5\u5B50\u4E2D\u3002");
-  const rows = `id: ${id}
-\u95EE\u9898\uFF1A
-${front.trim()}
-\u7B54\u6848\uFF1A
-${back.trim()}`;
-  parseCardBlock(rows);
-  const runs = rows.match(/`+/g) || [], fence = "`".repeat(Math.max(3, ...runs.map((x) => x.length + 1)));
-  return `${fence}practice-card
-${rows}
-${fence}`;
 }
 function parseNote(text2, path, tags2 = []) {
   var _a2;
@@ -2341,7 +4901,7 @@ function studyCards(notes, saved, scope, current, now) {
   const warnings = [], cards = [], byPath = new Map(notes.map((n) => [n.path, n]));
   for (const [id, occurrences] of found) {
     if (occurrences.length !== 1) {
-      warnings.push(`\u5361\u7247 ID \u91CD\u590D\uFF0C\u5DF2\u8DF3\u8FC7\uFF1A${occurrences.map((c2) => c2.sourcePath + ":" + (c2.line + 1)).join("\u3001")}\u3002\u8BF7\u7528\u300C\u63D2\u5165\u5361\u7247\u6807\u8BB0\u300D\u521B\u5EFA\u65B0\u5361\uFF0C\u52FF\u590D\u5236 id\u3002`);
+      warnings.push(`\u5361\u7247 ID \u91CD\u590D\uFF0C\u5DF2\u8DF3\u8FC7\uFF1A${occurrences.map((c2) => c2.sourcePath + ":" + (c2.line + 1)).join("\u3001")}\u3002\u8BF7\u68C0\u67E5\u539F\u6709\u6807\u8BB0\u7F16\u53F7\uFF1B\u65B0\u5361\u7247\u8BF7\u4F7F\u7528\u72EC\u7ACB\u300C\u65B0\u5EFA\u5361\u7247\u300D\u3002`);
       continue;
     }
     const c = occurrences[0], n = byPath.get(c.sourcePath);
@@ -2350,40 +4910,248 @@ function studyCards(notes, saved, scope, current, now) {
     cards.push(previous ? { ...previous, front: c.front, back: c.back, sourcePath: c.sourcePath } : createCard(c.front, c.back, c.sourcePath, now, id));
   }
   for (const c of saved) {
-    if (c.id.startsWith("note:")) continue;
+    if (c.id.startsWith("note:") && found.has(c.id)) continue;
+    if (c.id.startsWith("note:")) warnings.push("\u6765\u6E90\u6807\u8BB0\u7F3A\u5931\uFF0C\u4FDD\u7559\u6700\u540E\u5FEB\u7167\u4E0E\u8FDB\u5EA6\uFF1A" + c.sourcePath);
     const n = byPath.get(c.sourcePath);
     if (matchesScope(c.sourcePath, (n == null ? void 0 : n.tags) || [], scope, current)) cards.push({ ...c });
   }
   return { cards, warnings };
 }
-function assertSafeAppend(text2) {
-  const rows = text2.replace(/\r\n/g, "\n").split("\n");
-  let start = 0;
-  if (rows[0] === "---") {
-    const end = rows.findIndex((r, i) => i > 0 && (r === "---" || r === "..."));
-    if (end < 0) throw new Error("\u7B14\u8BB0\u7684 YAML \u5C5E\u6027\u533A\u5C1A\u672A\u95ED\u5408\uFF0C\u8BF7\u5148\u8865\u4E0A\u7ED3\u5C3E --- \u518D\u63D2\u5165\u5361\u7247");
-    start = end + 1;
+
+// src/source-location.ts
+function resolvePassageSourceLine(text2, passage) {
+  if (!passage.path) throw new Error("\u8FD9\u6BB5\u7EC3\u4E60\u6CA1\u6709\u6765\u6E90\u7B14\u8BB0\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u7B14\u8BB0\u6216\u9009\u6BB5\u3002");
+  const source = normalize(text2), target = normalize(passage.text);
+  if (passage.sourceRef) return resolveReference(source, passage.path, passage.sourceRef);
+  const missing = "\u6765\u6E90\u5185\u5BB9\u5DF2\u53D8\u5316\u6216\u5DF2\u79FB\u9664\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u672C\u8282\u3002\u8BF7\u5237\u65B0\u5185\u5BB9\u540E\u91CD\u65B0\u9009\u62E9\u7EC3\u4E60\u3002";
+  const ambiguous = "\u6765\u6E90\u4E2D\u6709\u591A\u5904\u76F8\u540C\u7684\u6BB5\u843D\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u3002\u8BF7\u6253\u5F00\u7B14\u8BB0\u6838\u5BF9\u540E\u91CD\u65B0\u9009\u62E9\u7EC3\u4E60\u3002";
+  if (!target.trim()) throw new Error(missing);
+  if (passage.kind === "selection" || !passage.kind && !passage.headingPath && !Number.isInteger(passage.headingLine)) {
+    return uniqueLine(literalOccurrences(source, target, false).map((match) => match.line), missing, ambiguous);
   }
-  let char = "", length = 0;
-  for (const row of rows.slice(start)) {
-    const f = row.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (!f) continue;
-    if (!char) {
-      char = f[1][0];
-      length = f[1].length;
-    } else if (f[1][0] === char && f[1].length >= length && !f[2].trim()) {
-      char = "";
-      length = 0;
+  const candidates = parseNote(source, passage.path).passages.filter((current) => normalize(current.text) === target && current.question === passage.question && (!passage.kind || current.kind === passage.kind) && (!passage.headingPath || samePath(current.headingPath || [], passage.headingPath)));
+  return uniqueLine(candidates.map((current) => current.line), missing, ambiguous);
+}
+function resolveCardSourceLine(text2, card) {
+  if (!card.sourcePath) throw new Error("\u8FD9\u5F20\u5361\u7247\u6CA1\u6709\u6765\u6E90\u7B14\u8BB0\uFF0C\u8BF7\u5148\u5728\u5361\u7247\u4E2D\u586B\u5199\u6765\u6E90\u8DEF\u5F84\u3002");
+  const source = normalize(text2);
+  if (card.id.startsWith("note:")) {
+    const cards = parseNote(source, card.sourcePath).cards.filter((current2) => current2.id === card.id);
+    if (!cards.length) throw new Error("\u6765\u6E90\u4E2D\u7684\u5361\u7247\u6807\u8BB0\u5DF2\u79FB\u9664\u6216\u683C\u5F0F\u5DF2\u53D8\u5316\u3002\u8BF7\u6253\u5F00\u7B14\u8BB0\u68C0\u67E5 practice-card \u6807\u8BB0\uFF0C\u518D\u5237\u65B0\u5361\u7247\u3002");
+    if (cards.length !== 1) throw new Error("\u6765\u6E90\u4E2D\u6709\u91CD\u590D\u7684\u5361\u7247 ID\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u3002\u8BF7\u4E3A\u7B14\u8BB0\u5361\u7247\u4FDD\u7559\u72EC\u7ACB\u7F16\u53F7\uFF0C\u518D\u5237\u65B0\u5361\u7247\u3002");
+    const current = cards[0];
+    if (normalize(current.front) !== normalize(card.front) || normalize(current.back) !== normalize(card.back)) throw new Error("\u6765\u6E90\u4E2D\u7684\u95EE\u9898\u6216\u7B54\u6848\u5DF2\u53D8\u5316\u3002\u8BF7\u5237\u65B0\u5361\u7247\u540E\u91CD\u65B0\u6253\u5F00\u6765\u6E90\u3002");
+    return current.line;
+  }
+  if (card.sourceRef) return resolveReference(source, card.sourcePath, card.sourceRef);
+  throw new Error("\u8FD9\u5F20\u5361\u7247\u672A\u4FDD\u5B58\u72EC\u7ACB\u7684\u539F\u6587\u6765\u6E90\u4FE1\u606F\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u3002\u8BF7\u6253\u5F00\u6765\u6E90\u7B14\u8BB0\u6838\u5BF9\uFF0C\u6216\u91CD\u65B0\u4ECE\u5BF9\u5E94\u539F\u6587\u4FDD\u5B58\u5361\u7247\uFF1B\u73B0\u6709\u7B54\u6848\u4E0E\u5B66\u4E60\u8FDB\u5EA6\u4ECD\u4FDD\u7559\u3002");
+}
+function resolveReference(source, path, ref) {
+  var _a2;
+  const missing = "\u4FDD\u5B58\u65F6\u7684\u539F\u6587\u6216\u6807\u9898\u5DF2\u53D8\u5316\u3001\u79FB\u9664\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u3002\u8BF7\u5728\u6765\u6E90\u7B14\u8BB0\u4E2D\u6838\u5BF9\u540E\u91CD\u65B0\u4FDD\u5B58\u5361\u7247\u3002";
+  const ambiguous = "\u6765\u6E90\u4E2D\u6709\u591A\u5904\u76F8\u540C\u7684\u539F\u6587\u548C\u6807\u9898\uFF0C\u65E0\u6CD5\u51C6\u786E\u5B9A\u4F4D\u3002\u8BF7\u6838\u5BF9\u5BF9\u5E94\u6BB5\u843D\u540E\u91CD\u65B0\u4FDD\u5B58\u5361\u7247\u3002";
+  if (ref.kind === "passage") {
+    if (!ref.question || !ref.passageKind || !ref.headingPath) throw new Error(missing);
+    return resolvePassageSourceLine(source, { path, text: ref.excerpt, question: ref.question, line: ref.line, endLine: ref.endLine + 1, kind: ref.passageKind, headingPath: [...ref.headingPath] });
+  }
+  if (ref.kind === "selection") {
+    const excerpt2 = normalize(ref.excerpt);
+    if (!excerpt2.trim()) throw new Error(missing);
+    const structure2 = markdownStructure(source);
+    const candidates2 = literalOccurrences(source, excerpt2, false).filter((match) => {
+      var _a3;
+      return !ref.headingPath || samePath(((_a3 = structure2.headings.filter((heading) => heading.line <= match.line).at(-1)) == null ? void 0 : _a3.path) || [], ref.headingPath);
+    });
+    return uniqueLine(candidates2.map((match) => match.line), missing, ambiguous);
+  }
+  const excerpt = normalize(ref.excerpt).trim();
+  if (!excerpt) throw new Error(missing);
+  const structure = markdownStructure(source);
+  const candidates = literalOccurrences(source, excerpt, true).filter((match) => visibleEvidence(structure, match) && (!ref.heading || headingAliases(structure, path, match.line).has(ref.heading)));
+  const saved = candidates.find((match) => match.line === ref.line && match.endLine === ref.endLine && structure.rows.slice(ref.line, ref.endLine + 1).join("\n").trim() === excerpt);
+  const line = uniqueLine(candidates.map((match) => match.line), missing, ambiguous);
+  return (_a2 = saved == null ? void 0 : saved.line) != null ? _a2 : line;
+}
+function normalize(text2) {
+  return text2.replace(/\r\n/g, "\n");
+}
+function samePath(a, b) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+function uniqueLine(lines, missing, ambiguous) {
+  if (!lines.length) throw new Error(missing);
+  if (lines.length !== 1) throw new Error(ambiguous);
+  return lines[0];
+}
+function literalOccurrences(source, value, wholeLines) {
+  if (!value.trim()) return [];
+  const matches = [];
+  let from = 0, line = 0, countedTo = 0;
+  while (from <= source.length) {
+    const at = source.indexOf(value, from);
+    if (at < 0) break;
+    for (let i = countedTo; i < at; i++) if (source[i] === "\n") line++;
+    countedTo = at;
+    const end = at + value.length, startOfLine = source.lastIndexOf("\n", at - 1) + 1, nextNewline = source.indexOf("\n", end), endOfLine = nextNewline < 0 ? source.length : nextNewline;
+    if (!wholeLines || !source.slice(startOfLine, at).trim() && !source.slice(end, endOfLine).trim()) {
+      matches.push({ line, endLine: line + value.split("\n").length - 1 });
     }
+    from = at + 1;
   }
-  if (char) throw new Error("\u7B14\u8BB0\u672B\u5C3E\u4ECD\u5728\u672A\u95ED\u5408\u7684\u4EE3\u7801\u5757\u4E2D\uFF0C\u8BF7\u5148\u95ED\u5408\u4EE3\u7801\u5757\u518D\u63D2\u5165\u5361\u7247");
+  return matches;
+}
+function visibleEvidence(structure, match) {
+  if (match.line < structure.start) return false;
+  for (let line = match.line; line <= match.endLine; line++) {
+    const visible = structure.visibleRows[line];
+    if (visible === void 0 || visible !== structure.rows[line]) return false;
+  }
+  return true;
+}
+function headingAliases(structure, path, line) {
+  var _a2, _b, _c, _d;
+  const heading = structure.headings.filter((h) => h.contentLine <= line).at(-1);
+  const name = path.split("/").pop().replace(/\.md$/i, "");
+  const declared = structure.start ? (_a2 = structure.rows.slice(1, structure.start - 1).find((row) => /^title:\s*[^|>]/.test(row))) == null ? void 0 : _a2.replace(/^title:\s*/, "").replace(/^["']|["']$/g, "") : void 0;
+  const aliases = /* @__PURE__ */ new Set();
+  const addTrail = (trail, start) => {
+    let label2 = "";
+    const caption2 = /^(?:图解步骤\s*\d+|图\s*\d+(?:[.－-]\d+)*(?:[：:\s].*)?|(?:Python|Java|C\+\+|C|JavaScript|TypeScript|Go|Rust|Swift|Kotlin|Dart|C#)?\s*(?:参考实现|源码|代码文件)[：:].*|[\w.-]+\.(?:py|js|ts|java|cpp|c|go|rs))$/i;
+    for (let i = start; i <= line; i++) {
+      const row = structure.visibleRows[i];
+      if (row === void 0) continue;
+      const example = row.match(/^\s*\*\*(例[一二三四五六七八九十0-9]+[：:][^*]{1,60})\*\*/);
+      if (example) label2 = plainText(example[1]);
+      const strong = row.match(/^\s*\*\*([^*\n]{1,80})\*\*\s*$/);
+      if (strong && !/[。！!]|\.\s|\.$/.test(strong[1]) && !caption2.test(plainText(strong[1]))) label2 = plainText(strong[1]);
+    }
+    if (label2) trail.push(label2);
+    if (!trail.length) aliases.add(declared || name);
+    else {
+      aliases.add(trail.join(" \u203A "));
+      aliases.add(trail.at(-1));
+    }
+  };
+  addTrail((heading == null ? void 0 : heading.path.map(plainText)) || [], (_b = heading == null ? void 0 : heading.contentLine) != null ? _b : structure.start);
+  const extracted = [];
+  for (const current of structure.headings) {
+    if (current.contentLine > line) break;
+    const row = structure.rows[current.line], atx = row.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*$/);
+    if (!atx || row.includes("<!--")) continue;
+    while (extracted.length && extracted.at(-1).level >= atx[1].length) extracted.pop();
+    extracted.push({ level: atx[1].length, text: plainText(atx[2]), contentLine: current.contentLine });
+  }
+  addTrail(extracted.map((h) => h.text), (_d = (_c = extracted.at(-1)) == null ? void 0 : _c.contentLine) != null ? _d : structure.start);
+  return aliases;
+}
+
+// src/interval.ts
+function intervalLabel(dueAt, now) {
+  const minutes = Math.max(1, Math.round((dueAt - now) / 6e4));
+  if (minutes < 60) return `${minutes} \u5206\u949F`;
+  if (minutes < 1440) return `${Math.round(minutes / 60)} \u5C0F\u65F6`;
+  return `${Math.round(minutes / 1440)} \u5929`;
+}
+
+// src/study-health.ts
+function studyStats(cards, now) {
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  return { active: cards.filter((c) => !c.suspended).length, new: cards.filter((c) => !c.suspended && c.reviews === 0).length, reviewed: cards.filter((c) => c.reviews > 0).length, paused: cards.filter((c) => c.suspended).length, today: cards.filter((c) => c.lastReviewedAt !== null && c.lastReviewedAt >= midnight.getTime() && c.lastReviewedAt <= now).length, due: cards.filter((c) => !c.suspended && c.dueAt <= now).length, nextWeek: cards.filter((c) => !c.suspended && c.dueAt > now && c.dueAt <= now + 7 * DAY_MS).length };
+}
+function locateEvidence(text2, excerpt) {
+  const normalized = text2.replace(/\r\n/g, "\n"), index = normalized.indexOf(excerpt);
+  return index < 0 ? { status: "changed", line: 0 } : { status: "present", line: normalized.slice(0, index).split("\n").length - 1 };
+}
+
+// src/cloze.ts
+function protectedSpans(text2) {
+  const spans = [];
+  let offset = 0, fence = "", size = 0, begin = 0;
+  for (const row of text2.split("\n")) {
+    const f = row.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (!fence && f) {
+      fence = f[1][0];
+      size = f[1].length;
+      begin = offset;
+    } else if (fence && f && f[1][0] === fence && f[1].length >= size && !f[2].trim()) {
+      spans.push([begin, offset + row.length]);
+      fence = "";
+    }
+    offset += row.length + 1;
+  }
+  if (fence) spans.push([begin, text2.length]);
+  const patterns = [/(`+)[\s\S]*?\1/g, /\$\$[\s\S]*?\$\$/g, /(?<!\\)\$(?:\\.|[^$\n])+?(?<!\\)\$/g, /\\\([\s\S]*?\\\)/g, /\\\[[\s\S]*?\\\]/g, /<!--(?:[\s\S]*?-->|[\s\S]*$)/g];
+  for (const pattern of patterns) for (const match of text2.matchAll(pattern)) spans.push([match.index, match.index + match[0].length]);
+  return spans;
+}
+function keywordSuggestions(text2) {
+  const spans = protectedSpans(text2), terms = [];
+  for (const m of text2.matchAll(/\*\*([^*\n]{1,60})\*\*/g)) {
+    if (!spans.some(([a, b]) => m.index < b && m.index + m[0].length > a) && !/[。！？.!?：:]/.test(m[1])) terms.push(m[1].trim());
+  }
+  return [...new Set(terms)].slice(0, 6);
+}
+function makeCloze(text2, keyword, heading = "\u5173\u952E\u8BCD\u56DE\u5FC6") {
+  const term = keyword.trim();
+  if (!term || term.length > 80 || /\n/.test(term)) throw new Error("\u8BF7\u8F93\u5165 1 \u81F3 80 \u5B57\u7B26\u7684\u5355\u884C\u5173\u952E\u8BCD");
+  const positions = [];
+  let i = 0;
+  while ((i = text2.indexOf(term, i)) >= 0) {
+    positions.push(i);
+    i += term.length;
+  }
+  if (!positions.length) throw new Error("\u539F\u6587\u4E2D\u6CA1\u6709\u5B8C\u5168\u76F8\u540C\u7684\u5173\u952E\u8BCD\uFF0C\u8BF7\u76F4\u63A5\u590D\u5236\u539F\u6587\u5B57\u8BCD");
+  const spans = protectedSpans(text2);
+  if (positions.some((i2) => spans.some(([a, b]) => i2 < b && i2 + term.length > a))) throw new Error("\u5173\u952E\u8BCD\u51FA\u73B0\u5728\u4EE3\u7801\u3001\u516C\u5F0F\u6216\u6CE8\u91CA\u4E2D\uFF0C\u8BF7\u9009\u62E9\u666E\u901A\u6B63\u6587\u91CC\u7684\u5173\u952E\u8BCD");
+  if (positions.length > 12) throw new Error("\u5173\u952E\u8BCD\u51FA\u73B0\u8D85\u8FC7 12 \u6B21\uFF0C\u8303\u56F4\u8FC7\u5BBD\uFF1B\u8BF7\u9009\u62E9\u66F4\u5177\u4F53\u7684\u8BCD");
+  let masked = text2;
+  for (const at of [...positions].reverse()) masked = masked.slice(0, at) + "\uFF3B\u2026\uFF3D" + masked.slice(at + term.length);
+  const safeHeading = heading.split(term).join("\uFF3B\u2026\uFF3D");
+  const front = `${safeHeading} \xB7 \u8865\u5168\u5173\u952E\u8BCD
+
+${masked}`;
+  if (front.length > 4e3) throw new Error("\u6316\u7A7A\u95EE\u9898\u8FC7\u957F\uFF0C\u8BF7\u9009\u62E9\u8F83\u77ED\u7684\u6BB5\u843D");
+  return { front, back: `\u5173\u952E\u8BCD\uFF1A${term}
+
+\u539F\u6587\uFF1A${text2}`, matches: positions.length };
+}
+
+// src/catalog.ts
+function excluded(path, entries) {
+  return entries.some((raw) => {
+    const value = raw.trim().replace(/^\/+|\/+$/g, "");
+    return !!value && (path === value || path.startsWith(value + "/"));
+  });
+}
+function parseExclusions(value) {
+  return [...new Set(value.split("\n").map((x) => x.trim().replace(/^\/+|\/+$/g, "")).filter((x) => x && !x.split("/").some((p) => p === "." || p === "..")))];
+}
+function paginate(items, page, size = 24) {
+  const pages = Math.max(1, Math.ceil(items.length / size)), current = Math.max(0, Math.min(Number.isFinite(page) ? Math.floor(page) : 0, pages - 1));
+  return { items: items.slice(current * size, (current + 1) * size), page: current, pages, total: items.length };
+}
+function matchesQuery(values, query) {
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean), haystack = values.join("\n").toLocaleLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}
+function noteTags(native, frontmatter) {
+  const result = [...native];
+  const legacy = frontmatter == null ? void 0 : frontmatter.tag;
+  const values = typeof legacy === "string" ? legacy.split(/[,，]/) : Array.isArray(legacy) ? legacy : [];
+  for (const value of values) if (typeof value === "string") {
+    const tag = value.trim().replace(/^#+/, "");
+    if (tag && tag.length <= 200 && !/[\r\n]/.test(tag)) result.push("#" + tag);
+  }
+  return [...new Set(result)].sort();
 }
 
 // src/study-view.ts
+var import_obsidian3 = require("obsidian");
 var STUDY_VIEW = "passage-practice-study";
 var ratingLabels = { again: "\u5FD8\u4E86", hard: "\u56F0\u96BE", good: "\u8BB0\u4F4F\u4E86", easy: "\u8F7B\u677E" };
 var date = (n) => new Date(n).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
-var StudyView = class extends import_obsidian2.ItemView {
+var StudyView = class extends import_obsidian3.ItemView {
   constructor(leaf, host) {
     super(leaf);
     this.host = host;
@@ -2392,6 +5160,9 @@ var StudyView = class extends import_obsidian2.ItemView {
     __publicField(this, "clockTimer");
     __publicField(this, "relearn", false);
     __publicField(this, "visibilityObserver", null);
+    __publicField(this, "selectedDeck", "");
+    __publicField(this, "deckName", "");
+    __publicField(this, "reviewOrder", "sequential");
     __publicField(this, "mode", "passage");
     __publicField(this, "screen", "home");
     __publicField(this, "studyScope", { kind: "current", value: "" });
@@ -2411,6 +5182,12 @@ var StudyView = class extends import_obsidian2.ItemView {
     __publicField(this, "compare", true);
     __publicField(this, "passageQueue", []);
     __publicField(this, "passagePosition", 0);
+    __publicField(this, "passageDrafts", /* @__PURE__ */ new Map());
+    __publicField(this, "retryAgain", false);
+    __publicField(this, "againCandidates", /* @__PURE__ */ new Set());
+    __publicField(this, "repeatPass", false);
+    __publicField(this, "deckDeleteConfirm", "");
+    __publicField(this, "configOpen", false);
     __publicField(this, "outline", null);
     __publicField(this, "outlineQueue", []);
     __publicField(this, "outlinePosition", 0);
@@ -2473,7 +5250,7 @@ var StudyView = class extends import_obsidian2.ItemView {
     await this.refresh();
     this.clockTimer = window.setInterval(() => {
       var _a2;
-      if (this.screen === "home" && this.mode === "cards" && !this.busy && !this.loading && !(this.contentEl.contains(document.activeElement) && ((_a2 = document.activeElement) == null ? void 0 : _a2.matches("input,textarea,select,[contenteditable=true]")))) this.render();
+      if (this.screen === "home" && this.mode === "cards" && !this.configOpen && !this.busy && !this.loading && !(this.contentEl.contains(document.activeElement) && ((_a2 = document.activeElement) == null ? void 0 : _a2.matches("input,textarea,select,[contenteditable=true]")))) this.render();
     }, 3e4);
   }
   async onClose() {
@@ -2482,15 +5259,18 @@ var StudyView = class extends import_obsidian2.ItemView {
     (_a2 = this.visibilityObserver) == null ? void 0 : _a2.disconnect();
     this.visibilityObserver = null;
     this.closed = true;
+    this.passageDrafts.clear();
     this.previews.reset();
     this.scanId++;
     this.host.shield(false);
     this.contentEl.empty();
   }
   getState() {
-    return { mode: this.mode, scope: this.studyScope, excludedPaths: this.excludedPaths, knowledgeKind: this.knowledgeKind, hideSaved: this.hideSaved };
+    return { reviewOrder: this.reviewOrder, mode: this.mode, selectedDeck: this.selectedDeck, scope: this.studyScope, excludedPaths: this.excludedPaths, knowledgeKind: this.knowledgeKind, hideSaved: this.hideSaved };
   }
   async setState(state, result) {
+    if ((state == null ? void 0 : state.reviewOrder) === "random" || (state == null ? void 0 : state.reviewOrder) === "sequential") this.reviewOrder = state.reviewOrder;
+    if (typeof (state == null ? void 0 : state.selectedDeck) === "string") this.selectedDeck = state.selectedDeck;
     if ((state == null ? void 0 : state.mode) === "cards" || (state == null ? void 0 : state.mode) === "passage" || (state == null ? void 0 : state.mode) === "outline" || (state == null ? void 0 : state.mode) === "knowledge") this.mode = state.mode;
     if ((state == null ? void 0 : state.scope) && ["all", "current", "folder", "tag"].includes(state.scope.kind) && typeof state.scope.value === "string") this.studyScope = state.scope;
     if (Array.isArray(state == null ? void 0 : state.excludedPaths)) this.excludedPaths = parseExclusions(state.excludedPaths.filter((x) => typeof x === "string").join("\n"));
@@ -2521,17 +5301,18 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.screen = "home";
     this.current = void 0;
     this.session = null;
-    this.message = "\u79BB\u5F00\u5B66\u4E60\u4FA7\u680F\uFF0C\u672A\u8BC4\u5206\u7684\u7EC3\u4E60\u5DF2\u7ED3\u675F";
+    this.passageDrafts.clear();
+    this.message = "\u79BB\u5F00\u5B66\u4E60\u4FA7\u680F\uFF0C\u672A\u8BC4\u5206\u7684\u7EC3\u4E60\u4E0E\u4E34\u65F6\u8349\u7A3F\u5DF2\u7ED3\u675F";
     this.render();
   }
   notifyChanged() {
     if (this.screen === "home" || this.screen === "library") void this.refresh();
   }
   async refresh(force = false, retry = 0) {
-    const token = ++this.scanId, started = performance.now();
+    const token2 = ++this.scanId, started = performance.now();
     this.loading = true;
     this.scanProgress = { done: 0, total: 0, reads: 0, cached: 0, milliseconds: 0 };
-    const notes = [], warnings = [], files = this.app.vault.getMarkdownFiles().filter((file) => !excluded(file.path, this.excludedPaths));
+    const notes = [], warnings = [], files = this.app.vault.getMarkdownFiles().filter((file) => !excluded(file.path, ["Passage Practice", "Passage Practice backups", ...this.excludedPaths]));
     this.scanProgress.total = files.length;
     const initialFiles = files.map((file) => ({ file, path: file.path, mtime: file.stat.mtime, size: file.stat.size }));
     if (this.screen === "home") this.render();
@@ -2544,14 +5325,14 @@ var StudyView = class extends import_obsidian2.ItemView {
             warnings.push(`\u8D85\u8FC7 2 MiB\uFF0C\u5DF2\u8DF3\u8FC7\uFF1A${path}`);
             return;
           }
-          const metadata = this.app.metadataCache.getFileCache(file) || {}, tags2 = noteTags((0, import_obsidian2.getAllTags)(metadata) || [], metadata.frontmatter), key = JSON.stringify(tags2), cached = this.cache.get(path);
+          const metadata = this.app.metadataCache.getFileCache(file) || {}, tags2 = noteTags((0, import_obsidian3.getAllTags)(metadata) || [], metadata.frontmatter), key = JSON.stringify(tags2), cached = this.cache.get(path);
           let note;
           if (!force && cached && cached.mtime === mtime && cached.size === size && cached.tags === key && cached.version === EXTRACTOR_VERSION) {
             note = cached.note;
             this.scanProgress.cached++;
           } else {
             const text2 = await (force ? this.app.vault.read(file) : this.app.vault.cachedRead(file));
-            if (token !== this.scanId || this.closed) return;
+            if (token2 !== this.scanId || this.closed) return;
             if (file.path !== path || file.stat.mtime !== mtime || file.stat.size !== size) {
               changedDuringRead = true;
               return;
@@ -2562,19 +5343,19 @@ var StudyView = class extends import_obsidian2.ItemView {
           }
           notes.push(note);
         } catch (e) {
-          if (token === this.scanId) warnings.push(`\u65E0\u6CD5\u8BFB\u53D6\uFF1A${path}`);
+          if (token2 === this.scanId) warnings.push(`\u65E0\u6CD5\u8BFB\u53D6\uFF1A${path}`);
         }
       }));
-      if (token !== this.scanId || this.closed) return false;
+      if (token2 !== this.scanId || this.closed) return false;
       this.scanProgress.done = Math.min(i + 12, files.length);
       if (performance.now() - lastPaint > 80 && this.screen === "home") {
         this.render();
         lastPaint = performance.now();
       }
       if (i + 12 < files.length) await new Promise((resolve) => window.setTimeout(resolve, 0));
-      if (token !== this.scanId || this.closed) return false;
+      if (token2 !== this.scanId || this.closed) return false;
     }
-    const latest = this.app.vault.getMarkdownFiles().filter((file) => !excluded(file.path, this.excludedPaths)), latestSet = new Set(latest);
+    const latest = this.app.vault.getMarkdownFiles().filter((file) => !excluded(file.path, ["Passage Practice", "Passage Practice backups", ...this.excludedPaths])), latestSet = new Set(latest);
     if (latest.length !== initialFiles.length || initialFiles.some((item) => !latestSet.has(item.file) || item.file.path !== item.path || item.file.stat.mtime !== item.mtime || item.file.stat.size !== item.size)) changedDuringRead = true;
     if (changedDuringRead) {
       if (retry < 2) return this.refresh(false, retry + 1);
@@ -2586,7 +5367,7 @@ var StudyView = class extends import_obsidian2.ItemView {
     const existing = new Set(files.map((f) => f.path));
     for (const path of this.cache.keys()) if (!existing.has(path)) this.cache.delete(path);
     this.indexedFiles = initialFiles;
-    this.notes = notes.sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
+    this.notes = notes.sort((a, b) => a.path.localeCompare(b.path, "zh-CN", { numeric: true }) || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     this.scanWarnings = warnings;
     this.loading = false;
     this.scanProgress.milliseconds = Math.round(performance.now() - started);
@@ -2602,8 +5383,15 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.render();
   }
   cards() {
-    var _a2;
-    return studyCards(this.notes, (((_a2 = this.host.store) == null ? void 0 : _a2.cards) || []).filter((c) => !excluded(c.sourcePath, this.excludedPaths)), this.studyScope, this.host.currentPath, Date.now());
+    var _a2, _b, _c;
+    const result = studyCards(this.notes, (((_a2 = this.host.store) == null ? void 0 : _a2.cards) || []).filter((c) => !excluded(c.sourcePath, this.excludedPaths)), this.studyScope, this.host.currentPath, Date.now());
+    const deck = (_c = (_b = this.host.store) == null ? void 0 : _b.decks) == null ? void 0 : _c.find((d) => d.id === this.selectedDeck);
+    if (this.selectedDeck && !deck) this.selectedDeck = "";
+    if (deck) {
+      const members = new Set(deck.cardIds);
+      result.cards = result.cards.filter((c) => members.has(c.id));
+    }
+    return result;
   }
   selectedNotes() {
     return this.notes.filter((n) => matchesScope(n.path, n.tags, this.studyScope, this.host.currentPath));
@@ -2641,7 +5429,7 @@ var StudyView = class extends import_obsidian2.ItemView {
       }
     } catch (e) {
       this.message = e instanceof Error ? e.message : "\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5";
-      if (this.closed) new import_obsidian2.Notice("\u4FDD\u5B58\u672A\u5B8C\u6210\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u56DE\u60F3\u7EC3\u4E60\u68C0\u67E5\u3002");
+      if (this.closed) new import_obsidian3.Notice("\u4FDD\u5B58\u672A\u5B8C\u6210\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u56DE\u60F3\u7EC3\u4E60\u68C0\u67E5\u3002");
     } finally {
       this.busy = false;
       if (!this.closed) {
@@ -2652,6 +5440,9 @@ var StudyView = class extends import_obsidian2.ItemView {
     }
   }
   home() {
+    this.passageDrafts.clear();
+    this.passageQueue = [];
+    this.againCandidates.clear();
     this.selectedCards.clear();
     this.bulkReview = null;
     this.screen = "home";
@@ -2710,11 +5501,20 @@ var StudyView = class extends import_obsidian2.ItemView {
       root.createEl("p", { text: this.message, cls: positive ? "pp-notice" : "pp-error", attr: { role: positive ? "status" : "alert" } });
     }
     if (this.screen === "home") {
-      this.renderScope(root);
+      if (this.mode === "cards" && !this.loading) this.renderCardPrimary(root);
+      const config = root.createEl("details", { cls: "pp-home-config" });
+      config.open = this.configOpen;
+      config.addEventListener("toggle", () => {
+        if (config.isConnected) this.configOpen = config.open;
+      });
+      config.createEl("summary", { text: "\u5B66\u4E60\u8303\u56F4\u3001\u5361\u7EC4\u4E0E\u987A\u5E8F \xB7 " + (this.studyScope.kind === "current" ? "\u5F53\u524D\u7B14\u8BB0" : this.studyScope.kind === "all" ? "\u6574\u4E2A\u77E5\u8BC6\u5E93" : this.studyScope.value) });
+      this.renderScope(config);
+      if (this.mode === "cards" || this.mode === "knowledge") this.renderDecks(config);
+      if (["passage", "outline", "cards"].includes(this.mode)) this.renderReviewOptions(config);
       this.renderHome(root);
     } else {
       const bar = root.createDiv({ cls: "pp-session-bar" });
-      bar.createEl("span", { text: this.screen === "passage" ? "\u6BB5\u843D\u590D\u4E60 \xB7 \u672C\u6B21\u5FEB\u7167" : this.screen === "outline" ? "\u5927\u7EB2\u56DE\u5FC6 \xB7 \u7ED3\u6784\u5FEB\u7167" : this.screen === "card" ? "\u95EE\u7B54\u5361\u7247 \xB7 \u624B\u5DE5\u81EA\u8BC4" : this.screen === "library" ? "\u5361\u7247\u7BA1\u7406" : "\u660E\u786E\u95EE\u9898\u4E0E\u7B54\u6848" });
+      bar.createEl("span", { text: this.screen === "passage" ? "\u6BB5\u843D\u590D\u4E60" : this.screen === "outline" ? "\u5927\u7EB2\u56DE\u5FC6" : this.screen === "card" ? "\u95EE\u7B54\u5361\u7247" : this.screen === "library" ? "\u5361\u7247\u7BA1\u7406" : "\u660E\u786E\u95EE\u9898\u4E0E\u7B54\u6848" });
       this.button(bar, this.screen === "edit" ? "\u53D6\u6D88\u7F16\u8F91" : "\u8FD4\u56DE\u5B66\u4E60", () => {
         if (this.screen === "edit") this.cancelEdit();
         else this.home();
@@ -2728,8 +5528,90 @@ var StudyView = class extends import_obsidian2.ItemView {
       else if (this.screen === "backup") this.renderBackup(root);
       else this.renderLibrary(root);
     }
-    if (this.screen === "home" && !this.loading && this.scanProgress.total) root.createEl("p", { text: `\u7D22\u5F15 ${this.scanProgress.total} \u7BC7 \xB7 \u8BFB\u53D6 ${this.scanProgress.reads} \xB7 \u590D\u7528 ${this.scanProgress.cached} \xB7 ${this.scanProgress.milliseconds} ms`, cls: "pp-index-status" });
-    root.createEl("p", { text: "\u4EC5\u672C\u5730\u4FDD\u5B58 \xB7 \u4E0D\u8054\u7F51 \xB7 \u4E0D\u81EA\u52A8\u8BC4\u5206", cls: "pp-local-footnote" });
+  }
+  renderReviewOptions(root) {
+    const box = root.createDiv({ cls: "pp-scope pp-review-options" });
+    box.createEl("label", { text: "\u590D\u4E60\u987A\u5E8F" });
+    const order = box.createEl("select", { attr: { "aria-label": "\u590D\u4E60\u987A\u5E8F" } });
+    order.createEl("option", { text: "\u987A\u5E8F\u590D\u4E60", attr: { value: "sequential" } });
+    order.createEl("option", { text: "\u4E71\u5E8F\u590D\u4E60", attr: { value: "random" } });
+    order.value = this.reviewOrder;
+    order.addEventListener("change", () => {
+      this.reviewOrder = order.value;
+      this.remember();
+      this.render();
+    });
+    if (this.mode === "cards") {
+      const row = box.createEl("label", { cls: "pp-relearn" }), check = row.createEl("input", { attr: { type: "checkbox", "aria-label": "\u672C\u8F6E\u518D\u7EC3\u5FD8\u4E86\u7684\u5361\u7247" } });
+      check.checked = this.retryAgain;
+      check.addEventListener("change", () => this.retryAgain = check.checked);
+      row.createEl("span", { text: "\u672C\u8F6E\u7ED3\u675F\u540E\uFF0C\u518D\u7EC3\u4E00\u6B21\u300C\u5FD8\u4E86\u300D\u4E14\u5DF2\u5230\u671F\u7684\u5361\u7247" });
+      box.createEl("p", { text: "\u6BCF\u5F20\u6700\u591A\u8FFD\u52A0\u4E00\u6B21\uFF0C\u4E0D\u63D0\u524D\u7EC3\u672A\u5230\u671F\u5361\u7247\uFF1B\u7B97\u6CD5\u5728 Obsidian \u8BBE\u7F6E \u2192 Passage Practice\uFF08\u56DE\u60F3\u7EC3\u4E60\uFF09\u4E2D\u9009\u62E9\u3002", cls: "pp-footnote" });
+    }
+    box.createEl("p", { text: this.mode === "cards" ? "\u53EA\u590D\u4E60\u5DF2\u5230\u671F\u5361\u7247\uFF1B\u4E71\u5E8F\u4F1A\u6253\u4E71\u672C\u8F6E\u987A\u5E8F\u3002" : this.reviewOrder === "random" ? "\u672C\u8F6E\u968F\u673A\u6392\u5217\uFF0C\u4E0A\u4E00\u8282\u4E0E\u4E0B\u4E00\u8282\u4FDD\u6301\u540C\u4E00\u987A\u5E8F\u3002" : "\u6309\u7B14\u8BB0\u3001\u5C0F\u8282\u7684\u539F\u6709\u987A\u5E8F\u590D\u4E60\u3002", cls: "pp-footnote" });
+  }
+  renderDecks(root) {
+    const store = this.host.store;
+    if (!store) return;
+    const box = root.createDiv({ cls: "pp-scope" });
+    box.createEl("label", { text: "\u5361\u7EC4", attr: { for: "pp-deck" } });
+    const select = box.createEl("select", { attr: { id: "pp-deck", "aria-label": "\u9009\u62E9\u5361\u7EC4" } });
+    select.createEl("option", { text: "\u5168\u90E8\u5361\u7EC4", attr: { value: "" } });
+    for (const deck2 of store.decks || []) select.createEl("option", { text: `${deck2.name} \xB7 ${deck2.cardIds.length} \u5F20`, attr: { value: deck2.id } });
+    select.value = this.selectedDeck;
+    select.addEventListener("change", () => {
+      this.selectedDeck = select.value;
+      this.selectedCards.clear();
+      this.remember();
+      this.render();
+    });
+    const controls = box.createEl("details");
+    controls.createEl("summary", { text: "\u65B0\u5EFA\u5361\u7EC4" });
+    const name = controls.createEl("input", { attr: { "aria-label": "\u65B0\u5361\u7EC4\u540D\u79F0", maxlength: "100", placeholder: "\u4F8B\u5982\uFF1A\u6570\u636E\u7ED3\u6784" } });
+    name.value = this.deckName;
+    name.addEventListener("input", () => this.deckName = name.value);
+    this.button(controls, "\u521B\u5EFA\u7A7A\u5361\u7EC4", () => void this.run(async () => {
+      const deck2 = await store.createDeck(this.deckName);
+      this.selectedDeck = deck2.id;
+      this.deckName = "";
+    }, () => {
+      this.remember();
+      this.message = "\u5DF2\u521B\u5EFA\u5361\u7EC4";
+    }));
+    box.createEl("p", { text: "\u65B0\u5361\u7247\u4FDD\u5B58\u5230\u6240\u9009\u5361\u7EC4\uFF1B\u9009\u300C\u5168\u90E8\u5361\u7EC4\u300D\u65F6\u4FDD\u5B58\u5230\u9ED8\u8BA4\u5361\u7EC4\u3002", cls: "pp-footnote" });
+    const deck = store.decks.find((d) => d.id === this.selectedDeck);
+    if (deck) {
+      const manage = box.createEl("details");
+      manage.createEl("summary", { text: "\u7BA1\u7406\u5F53\u524D\u5361\u7EC4" });
+      const rename = manage.createEl("input", { attr: { "aria-label": "\u5361\u7EC4\u65B0\u540D\u79F0", maxlength: "100" } });
+      rename.value = deck.name;
+      this.button(manage, "\u4FDD\u5B58\u5361\u7EC4\u540D\u79F0", () => void this.run(() => store.renameDeck(deck.id, deck.revision, rename.value), () => {
+        this.message = "\u5DF2\u91CD\u547D\u540D\u5361\u7EC4";
+      }));
+      if (deck.id !== DEFAULT_DECK) {
+        const del = this.button(manage, "\u5220\u9664\u7A7A\u5361\u7EC4", () => {
+          this.deckDeleteConfirm = deck.id;
+          this.render();
+        });
+        del.disabled = !!deck.cardIds.length || this.busy;
+        if (deck.cardIds.length) manage.createEl("p", { text: "\u53EA\u80FD\u5220\u9664\u7A7A\u5361\u7EC4\uFF0C\u53EF\u5728\u7BA1\u7406\u5361\u7247\u4E2D\u79FB\u51FA\u6210\u5458\uFF1B\u5361\u7247\u548C\u8BC4\u5206\u4E0D\u4F1A\u5220\u9664\u3002", cls: "pp-footnote" });
+      }
+      if (this.deckDeleteConfirm === deck.id) {
+        manage.open = true;
+        const confirm = manage.createDiv({ cls: "pp-bulk-confirm" });
+        confirm.createEl("p", { text: `\u786E\u8BA4\u5220\u9664\u7A7A\u5361\u7EC4\u300C${deck.name}\u300D\uFF1F\u53EA\u5220\u9664\u5361\u7EC4\u5B9A\u4E49\uFF0C\u5361\u7247\u548C\u8BC4\u5206\u4FDD\u7559\u3002` });
+        this.button(confirm, "\u53D6\u6D88\u5220\u9664\u5361\u7EC4", () => {
+          this.deckDeleteConfirm = "";
+          this.render();
+        });
+        this.button(confirm, "\u786E\u8BA4\u5220\u9664\u7A7A\u5361\u7EC4", () => void this.run(() => store.deleteEmptyDeck(deck.id, deck.revision), () => {
+          this.selectedDeck = "";
+          this.deckDeleteConfirm = "";
+          this.remember();
+          this.message = "\u5DF2\u5220\u9664\u7A7A\u5361\u7EC4\uFF0C\u5361\u7247\u4E0E\u8BC4\u5206\u4FDD\u7559";
+        }));
+      }
+    }
   }
   renderScope(root) {
     const box = root.createDiv({ cls: "pp-scope" });
@@ -2800,6 +5682,29 @@ var StudyView = class extends import_obsidian2.ItemView {
     }
     return [...set].sort((a, b) => a.localeCompare(b, "zh-CN"));
   }
+  renderCardPrimary(root) {
+    if (!this.host.store) return;
+    const cards = this.cards().cards, due = dueCards(cards, Date.now()), row = root.createDiv({ cls: "pp-primary-actions" });
+    const start = this.button(row, due.length ? `\u5F00\u59CB\u590D\u4E60 ${due.length} \u5F20` : "\u6682\u65E0\u5230\u671F\u5361\u7247", () => this.startCards(due), true);
+    start.disabled = !due.length || this.busy;
+    this.button(row, "\u65B0\u5EFA\u5361\u7247", () => this.openEditor(), true);
+    this.renderScopeCount(root, cards.length);
+  }
+  renderScopeCount(root, count) {
+    var _a2;
+    const deck = (_a2 = this.host.store) == null ? void 0 : _a2.decks.find((d) => d.id === this.selectedDeck);
+    if (!deck) {
+      root.createEl("p", { text: `\u672C\u8303\u56F4 ${count} \u5F20 \xB7 \u5168\u90E8\u5361\u7EC4`, cls: "pp-footnote" });
+      return;
+    }
+    root.createEl("p", { text: `${deck.name}\uFF1A\u672C\u8303\u56F4 ${count} \u5F20 / \u5168\u7EC4 ${deck.cardIds.length} \u5F20 \xB7 \u540C\u65F6\u5E94\u7528\u5B66\u4E60\u8303\u56F4\u4E0E\u5361\u7EC4`, cls: "pp-footnote" });
+    if (this.studyScope.kind !== "all") this.button(root, "\u67E5\u770B\u5168\u7EC4\uFF08\u5207\u5230\u6574\u4E2A\u77E5\u8BC6\u5E93\uFF09", () => {
+      this.studyScope = { kind: "all", value: "" };
+      this.selectedCards.clear();
+      this.remember();
+      this.render();
+    });
+  }
   renderHome(root) {
     if (this.loading) {
       root.createEl("p", { text: `\u6B63\u5728\u8BFB\u53D6 ${this.scanProgress.done} / ${this.scanProgress.total} \u7BC7\u7B14\u8BB0\u2026`, cls: "pp-muted", attr: { role: "status" } });
@@ -2827,9 +5732,21 @@ var StudyView = class extends import_obsidian2.ItemView {
     }
     const intro = root.createDiv({ cls: "pp-mode-intro" });
     intro.createEl("h2", { text: this.mode === "passage" ? "\u4E00\u4E2A\u6807\u9898\uFF0C\u56DE\u5FC6\u5B8C\u6574\u4E00\u8282" : "\u4E00\u4E2A\u95EE\u9898\uFF0C\u4E00\u5F20\u5361\u7247" });
-    intro.createEl("p", { text: this.mode === "passage" ? "\u6700\u5E95\u5C42\u6807\u9898\u662F\u95EE\u9898\uFF0C\u6807\u9898\u4E0B\u7684\u5168\u90E8\u6B63\u6587\u662F\u7B54\u6848\u3002\u591A\u6BB5\u6587\u5B57\u3001\u5217\u8868\u3001\u4EE3\u7801\u548C\u8868\u683C\u4E00\u8D77\u590D\u4E60\uFF1B\u7236\u6807\u9898\u7684\u5F15\u8A00\u5355\u72EC\u6807\u660E\u3002" : "\u6B63\u9762\u662F\u4F60\u8981\u56DE\u7B54\u7684\u95EE\u9898\uFF0C\u80CC\u9762\u662F\u6807\u51C6\u7B54\u6848\u3002\u53EA\u6709\u660E\u786E\u6807\u8BB0\u6216\u624B\u52A8\u4FDD\u5B58\u7684\u5361\u7247\u4F1A\u8FDB\u5165\u8FD9\u91CC\u3002" });
+    intro.createEl("p", { text: this.mode === "passage" ? this.reviewOrder === "random" ? "\u6253\u4E71\u719F\u6089\u7684\u987A\u5E8F\uFF0C\u9010\u8282\u56DE\u5FC6\u5E76\u6838\u5BF9\u3002" : "\u6309\u7B14\u8BB0\u987A\u5E8F\u9010\u8282\u56DE\u5FC6\uFF0C\u518D\u63ED\u6653\u539F\u6587\u6838\u5BF9\u3002" : "\u5148\u56DE\u5FC6\uFF0C\u518D\u63ED\u6653\u7B54\u6848\uFF0C\u9009\u62E9\u4E0B\u6B21\u590D\u4E60\u65F6\u95F4\u3002" });
     if (this.mode === "passage") {
       const row = root.createDiv({ cls: "pp-actions" });
+      const pool = passages.filter((p) => matchesQuery([p.question, p.text, p.path], this.passageQuery));
+      if (pool.length) this.button(row, this.reviewOrder === "random" ? "\u5F00\u59CB\u4E71\u5E8F\u590D\u4E60" : "\u5F00\u59CB\u987A\u5E8F\u590D\u4E60", () => {
+        const pool2 = passages.filter((p) => matchesQuery([p.question, p.text, p.path], this.passageQuery));
+        if (!pool2.length) {
+          this.message = "\u6CA1\u6709\u5339\u914D\u7684\u5C0F\u8282\uFF0C\u8BF7\u8C03\u6574\u641C\u7D22";
+          this.render();
+          return;
+        }
+        this.passageQueue = sessionOrder(pool2, this.reviewOrder);
+        this.passagePosition = 0;
+        this.beginPassage(this.passageQueue[0]);
+      }, true);
       const selected = this.button(row, "\u7EC3\u4E60\u7F16\u8F91\u5668\u9009\u6BB5", () => this.selection(), true);
       selected.disabled = !this.currentEditor() || this.busy;
       this.button(row, "\u5237\u65B0\u5185\u5BB9", () => void this.refresh(true));
@@ -2846,14 +5763,15 @@ var StudyView = class extends import_obsidian2.ItemView {
           this.passagePage = page.page;
           for (const p of page.items) {
             const b = this.button(list, "", () => {
-              this.passageQueue = filtered;
-              this.passagePosition = filtered.indexOf(p);
+              const session = sessionFrom(filtered, p, this.reviewOrder);
+              this.passageQueue = session.queue;
+              this.passagePosition = session.position;
               this.beginPassage(p);
             });
             b.addClass("pp-passage-choice");
             b.createEl("span", { text: p.question, cls: "pp-item-title" });
             b.createEl("span", { text: ((_a2 = p.headingPath) == null ? void 0 : _a2.join(" \u203A ")) || "\u65E0\u6807\u9898 \xB7 \u5168\u6587\u590D\u4E60", cls: "pp-item-preview" });
-            b.createEl("span", { text: `${p.text.length.toLocaleString()} \u5B57\u7B26 \xB7 \u5B8C\u6574\u7B54\u6848\u63ED\u6653\u540E\u663E\u793A`, cls: "pp-footnote" });
+            b.createEl("span", { text: `${p.text.length.toLocaleString()} \u5B57\u7B26`, cls: "pp-footnote" });
             b.createEl("span", { text: p.path, cls: "pp-source-path" });
           }
           this.pager(list, page, (change) => {
@@ -2876,17 +5794,8 @@ var StudyView = class extends import_obsidian2.ItemView {
       const statistics = studyStats(deck.cards, Date.now()), detail = root.createEl("details", { cls: "pp-study-overview" });
       detail.createEl("summary", { text: `\u4ECA\u5929\u590D\u4E60\u8FC7 ${statistics.today} \u5F20 \xB7 \u6682\u505C ${statistics.paused} \u5F20` });
       detail.createEl("p", { text: `\u5C1A\u672A\u590D\u4E60 ${statistics.new} \u5F20 \xB7 \u6709\u8FC7\u590D\u4E60 ${statistics.reviewed} \u5F20 \xB7 \u672A\u6765 7 \u5929\u5230\u671F ${statistics.nextWeek} \u5F20` });
-      detail.createEl("p", { text: "\u4F7F\u7528\u57FA\u7840\u95F4\u9694\u89C4\u5219\uFF08\u975E FSRS\uFF09\uFF1A\u5FD8\u4E86 10 \u5206\u949F\uFF0C\u56F0\u96BE/\u8BB0\u4F4F/\u8F7B\u677E\u4ECE 1/3/5 \u5929\u5F00\u59CB\u3002\u8FD9\u91CC\u6309\u5361\u7247\u7684\u6700\u8FD1\u4E00\u6B21\u8BC4\u5206\u7EDF\u8BA1\uFF0C\u4E0D\u662F\u5B8C\u6574\u6BCF\u65E5\u590D\u4E60\u65E5\u5FD7\u3002" });
+      detail.createEl("p", { text: "\u6839\u636E\u4F60\u7684\u8BC4\u5206\u5B89\u6392\u4E0B\u6B21\u590D\u4E60\u3002\u4ECA\u5929\u7684\u6570\u91CF\u6309\u6700\u8FD1\u4E00\u6B21\u8BC4\u5206\u7EDF\u8BA1\u3002" });
       const row = root.createDiv({ cls: "pp-actions" });
-      const start = this.button(row, due.length ? `\u5F00\u59CB\u590D\u4E60 ${due.length} \u5F20` : "\u6682\u65E0\u5230\u671F\u5361\u7247", () => {
-        this.queue = due;
-        this.reviewed = 0;
-        this.sessionTotal = due.length;
-        this.undo = void 0;
-        this.screen = "card";
-        this.advance();
-      }, true);
-      start.disabled = !due.length || this.busy;
       this.button(row, `\u7BA1\u7406\u5361\u7247 \xB7 ${deck.cards.length}`, () => {
         this.screen = "library";
         this.render();
@@ -2899,19 +5808,14 @@ var StudyView = class extends import_obsidian2.ItemView {
       });
       const next = deck.cards.filter((c) => !c.suspended && c.dueAt > Date.now()).sort((a, b) => a.dueAt - b.dueAt)[0];
       if (next) root.createEl("p", { text: `\u4E0B\u6B21\u5230\u671F ${date(next.dueAt)} \xB7 \u81EA\u52A8\u66F4\u65B0\u5230\u671F\u6570\u91CF`, cls: "pp-footnote" });
-      if (!deck.cards.length) root.createEl("p", { text: "\u8FD9\u4E2A\u8303\u56F4\u6CA1\u6709\u5361\u7247\u3002\u5148\u5728\u4E0B\u65B9\u586B\u5199\u95EE\u9898\u548C\u7B54\u6848\uFF0C\u518D\u63D2\u5165\u6807\u8BB0\uFF1B\u4E5F\u53EF\u4EE5\u521B\u5EFA\u672C\u5730\u5FEB\u7167\u5361\u7247\u3002\u666E\u901A\u7B14\u8BB0\u4E0D\u4F1A\u81EA\u52A8\u53D8\u6210\u5361\u7247\u3002", cls: "pp-empty" });
-      const create = root.createDiv({ cls: "pp-create-box" });
-      create.createEl("h3", { text: "\u600E\u6837\u6807\u8BB0\u4E00\u5F20\u5361\u7247\uFF1F" });
+      if (!deck.cards.length) root.createEl("p", { text: "\u8FD9\u4E2A\u8303\u56F4\u6CA1\u6709\u5361\u7247\u3002\u53EF\u4EE5\u65B0\u5EFA\u5361\u7247\uFF0C\u6216\u4ECE\u77E5\u8BC6\u63D0\u70BC\u4E2D\u5236\u5361\u3002", cls: "pp-empty" });
+      const create = root.createEl("details", { cls: "pp-create-box" });
+      create.createEl("summary", { text: "\u600E\u6837\u521B\u5EFA\u4E00\u5F20\u5361\u7247\uFF1F" });
       const sample = create.createDiv({ cls: "pp-qa-example" });
       sample.createEl("span", { text: "\u6B63\u9762 \xB7 \u95EE\u9898", cls: "pp-face-label" });
       sample.createEl("p", { text: "\u6808\u7684\u51FA\u5165\u987A\u5E8F\u662F\u4EC0\u4E48\uFF1F" });
       sample.createEl("span", { text: "\u80CC\u9762 \xB7 \u7B54\u6848", cls: "pp-face-label" });
       sample.createEl("p", { text: "\u540E\u8FDB\u5148\u51FA\uFF08LIFO\uFF09\u3002\u6700\u540E\u5165\u6808\u7684\u5143\u7D20\u6700\u5148\u51FA\u6808\u3002" });
-      const actions = create.createDiv({ cls: "pp-actions" });
-      const insert = this.button(actions, "\u63D2\u5165\u5361\u7247\u6807\u8BB0", () => this.openEditor(void 0, true), true);
-      insert.disabled = !this.currentEditor() || this.busy;
-      this.button(actions, "\u65B0\u5EFA\u5FEB\u7167\u5361\u7247", () => this.openEditor());
-      create.createEl("p", { text: this.currentEditor() ? "\u63D2\u5165\u524D\u5148\u586B\u5199\u95EE\u9898\u4E0E\u7B54\u6848\uFF0C\u786E\u8BA4\u540E\u624D\u5199\u5165\u5F53\u524D\u7B14\u8BB0\u3002\u5361\u7247\u7F16\u53F7\u81EA\u52A8\u751F\u6210\uFF0C\u4E0D\u7528\u624B\u5199\u3002" : "\u63D2\u5165\u6807\u8BB0\u9700\u8981\u5148\u6253\u5F00\u4E00\u7BC7\u53EF\u7F16\u8F91\u7684\u7B14\u8BB0\u3002\u4E5F\u53EF\u4FDD\u5B58\u4E0D\u4FEE\u6539\u7B14\u8BB0\u7684\u5FEB\u7167\u5361\u7247\u3002", cls: "pp-footnote" });
     }
     const warnings = [...this.scanWarnings, ...notes.flatMap((n) => n.warnings.map((w) => n.path + " \xB7 " + w)), ...deck.warnings];
     if (warnings.length) {
@@ -2936,7 +5840,7 @@ var StudyView = class extends import_obsidian2.ItemView {
     }
     const found = this.knowledge(), visiblePool = found.points.filter((p) => this.knowledgeKind === "all" || this.knowledgeKind === "structured" && p.confidence === "structured" || p.kind === this.knowledgeKind), intro = root.createDiv({ cls: "pp-mode-intro" });
     intro.createEl("h2", { text: "\u4ECE\u7B14\u8BB0\u91CC\uFF0C\u53D1\u73B0\u503C\u5F97\u8BB0\u4F4F\u7684\u5185\u5BB9" });
-    intro.createEl("p", { text: "\u672C\u5730\u89C4\u5219 \xB7 \u975E\u5927\u6A21\u578B\u3002\u9ED8\u8BA4\u5148\u770B\u5B9A\u4E49\u4E0E\u8981\u70B9\uFF1B\u5176\u4ED6\u539F\u6587\u6BB5\u843D\u53EF\u5207\u6362\u7C7B\u578B\u67E5\u770B\u3002\u6838\u5BF9\u95EE\u9898\u4E0E\u4E0A\u4E0B\u6587\u540E\uFF0C\u518D\u51B3\u5B9A\u5236\u5361\u3002" });
+    intro.createEl("p", { text: "\u5148\u770B\u5B9A\u4E49\u4E0E\u8981\u70B9\uFF0C\u6838\u5BF9\u539F\u6587\u540E\u5236\u6210\u5361\u7247\u3002" });
     const count = root.createDiv({ cls: "pp-study-stats" });
     for (const [n, label2] of [[this.selectedNotes().length, "\u7BC7\u7B14\u8BB0"], [visiblePool.length, "\u6761\u5019\u9009"]]) {
       const item = count.createDiv();
@@ -2987,7 +5891,7 @@ var StudyView = class extends import_obsidian2.ItemView {
           if (check.checked) {
             if (this.selectedCandidates.size >= 100) {
               check.checked = false;
-              new import_obsidian2.Notice("\u6BCF\u6279\u6700\u591A 100 \u6761\uFF0C\u8BF7\u5148\u6838\u5BF9\u4FDD\u5B58");
+              new import_obsidian3.Notice("\u6BCF\u6279\u6700\u591A 100 \u6761\uFF0C\u8BF7\u5148\u6838\u5BF9\u4FDD\u5B58");
               return;
             }
             this.selectedCandidates.set(p.id, p);
@@ -3038,7 +5942,7 @@ var StudyView = class extends import_obsidian2.ItemView {
   renderCandidate(root) {
     const p = this.candidate;
     root.createEl("h2", { text: "\u5148\u6838\u5BF9\uFF0C\u518D\u7559\u4E0B", cls: "pp-stage-title" });
-    root.createEl("p", { text: p.reason + "\u3002\u8FD9\u662F\u89C4\u5219\u5019\u9009\uFF0C\u4E0D\u4EE3\u8868\u5185\u5BB9\u6B63\u786E\u6216\u5B8C\u6574\u3002", cls: "pp-muted" });
+    root.createEl("p", { text: p.reason + "\u3002\u8BF7\u7ED3\u5408\u4E0A\u4E0B\u6587\u6838\u5BF9\u3002", cls: "pp-muted" });
     const evidence = root.createDiv({ cls: "pp-source-evidence" });
     evidence.createEl("span", { text: "\u9010\u5B57\u539F\u6587 \xB7 " + (p.headingPath.join(" \u203A ") || p.heading), cls: "pp-face-label" });
     this.previews.mount(evidence, p.excerpt, p.path);
@@ -3090,13 +5994,13 @@ var StudyView = class extends import_obsidian2.ItemView {
         this.previews.mount(face, value, p.path);
       }
     }
-    root.createEl("p", { text: "\u786E\u8BA4\u540E\u65B0\u589E\u4E00\u5F20\u672C\u5730\u5FEB\u7167\u5361\u7247\u3002\u5F53\u524D\u5019\u9009\u4E0D\u4FEE\u6539\u539F\u7B14\u8BB0\uFF1B\u7F16\u8F91\u540E\u7684\u7B54\u6848\u7531\u4F60\u8D1F\u8D23\u6838\u5BF9\u3002", cls: "pp-footnote" });
+    root.createEl("p", { text: "\u8BF7\u6838\u5BF9\u95EE\u9898\u3001\u7B54\u6848\u548C\u4E0A\u4E0B\u6587\uFF0C\u518D\u786E\u8BA4\u4FDD\u5B58\u3002", cls: "pp-footnote" });
     this.button(root, "\u786E\u8BA4\u4FDD\u5B58\u4E3A\u5361\u7247", () => {
       const d = { ...this.draft };
       void this.run(async () => {
         const current = await this.validateCandidate(p);
         if (!this.host.store) throw new Error(this.host.storageError);
-        const outcome = await this.host.store.addMany([{ ...d, sourceRef: this.sourceRef(current.point) }], Date.now(), () => this.assertSources([current]));
+        const outcome = await this.host.store.addMany([{ ...d, sourceRef: this.sourceRef(current.point) }], Date.now(), () => this.assertSources([current]), this.selectedDeck || DEFAULT_DECK);
         if (!outcome.added) throw new Error("\u76F8\u540C\u95EE\u9898\u4E0E\u7B54\u6848\u7684\u5361\u7247\u5DF2\u5B58\u5728\uFF0C\u6CA1\u6709\u91CD\u590D\u4FDD\u5B58\u3002\u8BF7\u8FD4\u56DE\u95EE\u7B54\u5361\u7247\u67E5\u770B\u3002");
       }, () => {
         this.selectedCandidates.delete(p.id);
@@ -3113,34 +6017,43 @@ var StudyView = class extends import_obsidian2.ItemView {
     (_a2 = this.contentEl.querySelector(".pp-import-preview")) == null ? void 0 : _a2.remove();
   }
   renderBackup(root) {
+    var _a2, _b, _c;
     root.createEl("h2", { text: "\u7ED9\u5B66\u4E60\u8FDB\u5EA6\u7559\u4E00\u4EFD\u5907\u4EFD", cls: "pp-stage-title" });
     root.createEl("p", { text: "\u5305\u62EC\u5168\u90E8\u672C\u5730\u5361\u7247\u3001\u5DF2\u8BB0\u5F55\u7684\u6807\u8BB0\u5361\u7247\u8BC4\u5206\u548C\u6765\u6E90\u8BC1\u636E\u3002\u5907\u4EFD\u5305\u542B\u4F60\u7684\u95EE\u9898\u4E0E\u7B54\u6848\uFF0C\u8BF7\u50CF\u7B14\u8BB0\u4E00\u6837\u4FDD\u7BA1\u3002", cls: "pp-muted" });
     this.button(root, "\u5BFC\u51FA JSON \u5230\u672C\u5730\u77E5\u8BC6\u5E93", () => void this.run(async () => {
-      const folder = "Passage Practice backups";
+      const parts = exportBackupParts(this.host.store.data), folder = "Passage Practice backups";
       if (!this.app.vault.getAbstractFileByPath(folder)) await this.app.vault.createFolder(folder);
-      const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-      let path = `${folder}/progress-${stamp}.json`, n = 1;
-      while (this.app.vault.getAbstractFileByPath(path)) path = `${folder}/progress-${stamp}-${n++}.json`;
-      await this.app.vault.create(path, exportBackup(this.host.store.cards));
-      this.message = "\u5DF2\u4FDD\u5B58\u5907\u4EFD\uFF1A" + path;
+      const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-"), paths = [];
+      try {
+        for (let i = 0; i < parts.length; i++) {
+          const suffix = parts.length > 1 ? `-part-${i + 1}-of-${parts.length}` : "";
+          let path = `${folder}/progress-${stamp}${suffix}.json`, n = 1;
+          while (this.app.vault.getAbstractFileByPath(path)) path = `${folder}/progress-${stamp}-${n++}${suffix}.json`;
+          await this.app.vault.create(path, parts[i]);
+          paths.push(path);
+        }
+      } catch (error) {
+        throw new Error(`\u5907\u4EFD\u5199\u5165\u4E2D\u65AD\uFF0C\u5DF2\u5199 ${paths.length} / ${parts.length} \u5377\uFF1B\u8FD9\u4E0D\u662F\u5B8C\u6574\u5907\u4EFD\uFF0C\u8BF7\u4FDD\u7559\u6E90\u6570\u636E\u5E76\u91CD\u65B0\u5BFC\u51FA\u3002`);
+      }
+      this.message = parts.length === 1 ? "\u5DF2\u4FDD\u5B58\u5907\u4EFD\uFF1A" + paths[0] : `\u5DF2\u4FDD\u5B58\u5168\u90E8 ${parts.length} \u5377\u5230 ${folder}\uFF1B\u6062\u590D\u65F6\u8BF7\u9010\u5377\u5BFC\u5165\uFF0C\u7F3A\u4E00\u5377\u5C31\u4E0D\u5B8C\u6574`;
     }, () => {
     }), true);
     root.createEl("h3", { text: "\u6062\u590D\u7F3A\u5931\u7684\u5361\u7247", cls: "pp-list-heading" });
     root.createEl("p", { text: "\u5148\u9884\u89C8\uFF0C\u518D\u786E\u8BA4\u3002\u4EC5\u5408\u5E76\u672C\u5730\u7F3A\u5C11\u7684\u5361\u7247\uFF1B\u540C\u7F16\u53F7\u51B2\u7A81\u548C\u76F8\u540C\u5185\u5BB9\u4FDD\u7559\u672C\u5730\u7248\u672C\uFF0C\u4E0D\u8986\u76D6\u73B0\u6709\u8FDB\u5EA6\u3002", cls: "pp-footnote" });
     const file = root.createEl("input", { attr: { type: "file", accept: ".json,application/json", "aria-label": "\u9009\u62E9\u8FDB\u5EA6\u5907\u4EFD" } });
     file.addEventListener("change", () => {
-      var _a2;
-      const selected = (_a2 = file.files) == null ? void 0 : _a2[0];
+      var _a3;
+      const selected = (_a3 = file.files) == null ? void 0 : _a3[0];
       if (!selected) return;
       this.invalidateBackup();
-      if (selected.size > 10 * 1024 * 1024) {
+      if (selected.size > MAX_BACKUP_BYTES) {
         this.message = "\u5907\u4EFD\u8D85\u8FC7 10 MiB";
         this.render();
         return;
       }
       void this.run(async () => {
         this.backupText = await selected.text();
-        this.importPlan = planImport(this.host.store.cards, parseBackup(this.backupText));
+        this.importPlan = planImport(this.host.store.data, parseBackup(this.backupText));
         this.previewedBackupText = this.backupText;
       }, () => {
       });
@@ -3148,10 +6061,10 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.field(root, "\u6216\u7C98\u8D34 JSON \u5907\u4EFD", this.backupText, (value) => {
       this.backupText = value;
       this.invalidateBackup();
-    }, "\u652F\u6301\u5BFC\u51FA\u7684\u5907\u4EFD\u6216\u65E7\u7248\u63D2\u4EF6 data.json", 10 * 1024 * 1024);
+    }, "\u652F\u6301\u5BFC\u51FA\u7684\u5907\u4EFD\u6216\u65E7\u7248\u63D2\u4EF6 data.json", MAX_BACKUP_BYTES);
     this.button(root, "\u9884\u89C8\u5408\u5E76\u7ED3\u679C", () => {
       try {
-        this.importPlan = planImport(this.host.store.cards, parseBackup(this.backupText));
+        this.importPlan = planImport(this.host.store.data, parseBackup(this.backupText));
         this.previewedBackupText = this.backupText;
         this.message = "";
       } catch (e) {
@@ -3164,7 +6077,24 @@ var StudyView = class extends import_obsidian2.ItemView {
     if (plan) {
       const summary = root.createDiv({ cls: "pp-import-preview" });
       summary.createEl("h3", { text: "\u5408\u5E76\u9884\u89C8" });
-      summary.createEl("p", { text: `\u65B0\u589E ${plan.add.length} \u5F20 \xB7 \u5B8C\u5168\u76F8\u540C ${plan.identical} \u5F20 \xB7 \u5185\u5BB9\u91CD\u590D ${plan.duplicates} \u5F20 \xB7 \u7F16\u53F7\u51B2\u7A81 ${plan.conflicts.length} \u5F20` });
+      if (plan.backupPart) summary.createEl("p", { text: `\u5206\u5377 ${plan.backupPart.index} / ${plan.backupPart.total} \xB7 \u8BF7\u5BFC\u5165\u540C\u4E00\u5907\u4EFD\u7684\u5168\u90E8\u5206\u5377\u3002\u91CD\u590D\u5BFC\u5165\u4E0D\u4F1A\u91CD\u590D\u5361\u7247\u3002`, cls: "pp-notice" });
+      const memberships = (plan.deckMemberships || []).reduce((n, d) => n + d.cardIds.length, 0);
+      if (memberships) summary.createEl("p", { text: `\u6062\u590D ${memberships} \u6761\u7F3A\u5931\u5361\u7EC4\u5173\u8054\uFF0C\u5DF2\u6709\u6210\u5458\u4FDD\u7559` });
+      if (plan.savedSchedulingAlgorithm) {
+        const label2 = (v) => v === "sm2-osr" ? "Spaced Repetition \xB7 \u6309\u5929" : "FSRS \xB7 \u8BB0\u5FC6\u6A21\u578B";
+        summary.createEl("p", { text: `\u5907\u4EFD\u7B97\u6CD5\uFF1A${label2(plan.savedSchedulingAlgorithm)}\uFF1B\u672C\u5730\u7B97\u6CD5\uFF1A${label2(plan.localSchedulingAlgorithm)}` });
+        const select = summary.createEl("select", { attr: { "aria-label": "\u6062\u590D\u540E\u7684\u590D\u4E60\u7B97\u6CD5" } });
+        select.createEl("option", { text: "\u8BF7\u9009\u62E9\u6062\u590D\u540E\u7684\u7B97\u6CD5", attr: { value: "" } });
+        select.createEl("option", { text: "\u4FDD\u7559\u672C\u5730\u7B97\u6CD5", attr: { value: "keep-local" } });
+        select.createEl("option", { text: "\u4F7F\u7528\u5907\u4EFD\u7B97\u6CD5", attr: { value: "use-backup" } });
+        select.value = plan.algorithmChoice || "";
+        select.addEventListener("change", () => {
+          this.importPlan = planImport(this.host.store.data, plan.incoming, select.value || void 0);
+          this.render();
+        });
+        summary.createEl("p", { text: "\u53EA\u9009\u62E9\u4EE5\u540E\u8BC4\u5206\u7684\u7B97\u6CD5\uFF1B\u73B0\u6709\u5361\u7247\u5230\u671F\u4E0E\u5386\u53F2\u4E0D\u91CD\u6392\u3002", cls: "pp-footnote" });
+      }
+      summary.createEl("p", { text: `\u65B0\u589E ${plan.add.length} \u5F20 \xB7 \u5B8C\u5168\u76F8\u540C ${plan.identical} \u5F20 \xB7 \u5185\u5BB9\u91CD\u590D ${plan.duplicates} \u5F20 \xB7 \u7F16\u53F7\u51B2\u7A81 ${plan.conflicts.length} \u5F20 \xB7 \u65B0\u589E\u5361\u7EC4 ${((_a2 = plan.decks) == null ? void 0 : _a2.length) || 0} \u4E2A \xB7 \u5361\u7EC4\u51B2\u7A81 ${((_b = plan.deckConflicts) == null ? void 0 : _b.length) || 0} \u4E2A` });
       if (plan.conflicts.length) summary.createEl("p", { text: "\u51B2\u7A81\u4FDD\u7559\u672C\u5730\u7248\u672C\uFF1A" + plan.conflicts.slice(0, 20).join("\u3001") + (plan.conflicts.length > 20 ? "\u2026" : ""), cls: "pp-footnote" });
       summary.createEl("p", { text: "\u65B0\u589E\u5361\u7247\u4FDD\u7559\u5907\u4EFD\u7684\u539F\u8BC4\u5206\u548C\u5230\u671F\u65F6\u95F4\u3002\u539F\u6587\u4ECD\u9700\u5BF9\u5E94\u7B14\u8BB0\u5B58\u5728\uFF1B\u6B64\u64CD\u4F5C\u4E0D\u6062\u590D\u7B14\u8BB0\u6587\u4EF6\u3002", cls: "pp-footnote" });
       let added = 0;
@@ -3176,7 +6106,7 @@ var StudyView = class extends import_obsidian2.ItemView {
         this.backupText = "";
         this.message = `\u5DF2\u6062\u590D ${added} \u5F20\u5361\u7247\uFF0C\u73B0\u6709\u5361\u7247\u672A\u8986\u76D6`;
       }), true);
-      accept.disabled = !plan.add.length || this.busy;
+      accept.disabled = plan.requiresAlgorithmChoice || !plan.add.length && !((_c = plan.decks) == null ? void 0 : _c.length) && !memberships && plan.schedulingAlgorithm === plan.localSchedulingAlgorithm || this.busy;
     }
   }
   sourceRef(p) {
@@ -3203,7 +6133,7 @@ var StudyView = class extends import_obsidian2.ItemView {
       if (!this.host.store) throw new Error(this.host.storageError);
       const verified = [];
       for (const p of this.batch) verified.push(await this.validateCandidate(p));
-      outcome = await this.host.store.addMany(verified.map(({ point: p }) => ({ front: p.question, back: p.excerpt, sourcePath: p.path, sourceRef: this.sourceRef(p) })), Date.now(), () => this.assertSources(verified));
+      outcome = await this.host.store.addMany(verified.map(({ point: p }) => ({ front: p.question, back: p.excerpt, sourcePath: p.path, sourceRef: this.sourceRef(p) })), Date.now(), () => this.assertSources(verified), this.selectedDeck || DEFAULT_DECK);
     }, () => {
       this.selectedCandidates.clear();
       this.batch = [];
@@ -3218,7 +6148,7 @@ var StudyView = class extends import_obsidian2.ItemView {
   }
   async validateCandidate(p) {
     const file = this.app.vault.getAbstractFileByPath(p.path);
-    if (!(file instanceof import_obsidian2.TFile)) throw new Error("\u6765\u6E90\u7B14\u8BB0\u5DF2\u79FB\u52A8\u6216\u5220\u9664\uFF0C\u8BF7\u5237\u65B0\u5019\u9009");
+    if (!(file instanceof import_obsidian3.TFile)) throw new Error("\u6765\u6E90\u7B14\u8BB0\u5DF2\u79FB\u52A8\u6216\u5220\u9664\uFF0C\u8BF7\u5237\u65B0\u5019\u9009");
     const snapshot = { point: p, file, path: p.path, mtime: file.stat.mtime, size: file.stat.size };
     const text2 = await this.app.vault.read(file);
     this.assertSources([snapshot]);
@@ -3229,8 +6159,8 @@ var StudyView = class extends import_obsidian2.ItemView {
   }
   async openKnowledgeSource(p) {
     const f = this.app.vault.getAbstractFileByPath(p.path);
-    if (!(f instanceof import_obsidian2.TFile)) {
-      new import_obsidian2.Notice("\u6765\u6E90\u7B14\u8BB0\u5DF2\u79FB\u52A8\u6216\u5220\u9664");
+    if (!(f instanceof import_obsidian3.TFile)) {
+      new import_obsidian3.Notice("\u6765\u6E90\u7B14\u8BB0\u5DF2\u79FB\u52A8\u6216\u5220\u9664");
       return;
     }
     await this.app.workspace.getLeaf(false).openFile(f, { eState: { line: p.line } });
@@ -3249,20 +6179,20 @@ var StudyView = class extends import_obsidian2.ItemView {
   selection() {
     const view = this.currentEditor();
     if (!view) {
-      new import_obsidian2.Notice("\u8BF7\u5148\u6253\u5F00\u53EF\u7F16\u8F91\u7684\u7B14\u8BB0");
+      new import_obsidian3.Notice("\u8BF7\u5148\u6253\u5F00\u53EF\u7F16\u8F91\u7684\u7B14\u8BB0");
       return;
     }
     const editor = view.editor, text2 = editor.getSelection();
     if (!text2.trim() || editor.listSelections().length !== 1 || text2.length > 5e4) {
-      new import_obsidian2.Notice("\u8BF7\u5728\u7B14\u8BB0\u4E2D\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
+      new import_obsidian3.Notice("\u8BF7\u5728\u7B14\u8BB0\u4E2D\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
       return;
     }
     this.passageQueue = [];
-    this.beginPassage({ text: text2, question: view.file.basename, line: editor.getCursor("from").line, path: view.file.path, kind: "selection" });
+    this.beginPassage({ text: text2, question: view.file.basename, line: editor.getCursor("from").line, path: view.file.path, kind: "selection", sourceRef: selectionSourceRef(editor.getValue(), text2, view.file.path, editor.getCursor("from").line) });
   }
   startSelection(p) {
     if (this.screen !== "home") {
-      new import_obsidian2.Notice("\u8BF7\u5148\u8FD4\u56DE\u5B66\u4E60\uFF0C\u518D\u5F00\u59CB\u65B0\u7EC3\u4E60");
+      new import_obsidian3.Notice("\u8BF7\u5148\u8FD4\u56DE\u5B66\u4E60\uFF0C\u518D\u5F00\u59CB\u65B0\u7EC3\u4E60");
       return;
     }
     this.mode = "passage";
@@ -3303,25 +6233,30 @@ var StudyView = class extends import_obsidian2.ItemView {
       if (mode === "passage") {
         const queue = this.selectedNotes().flatMap((n) => n.passages), at = queue.findIndex((p) => p.path === saved.path && p.line === saved.line && fingerprint(p.question + "\n" + p.text) === saved.identity);
         if (at < 0) throw new Error("\u4E0A\u6B21\u5C0F\u8282\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
-        this.passageQueue = queue;
-        this.passagePosition = at;
+        const session = sessionFrom(queue, queue[at], this.reviewOrder);
+        this.passageQueue = session.queue;
+        this.passagePosition = session.position;
         this.beginPassage(queue[at]);
       } else {
         const queue = this.selectedNotes().flatMap((n) => this.outlineBranches(n)), at = queue.findIndex((b) => b.id === saved.identity);
         if (at < 0) throw new Error("\u4E0A\u6B21\u5927\u7EB2\u8282\u70B9\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
-        this.outlineQueue = queue;
-        this.outlinePosition = at;
+        const session = sessionFrom(queue, queue[at], this.reviewOrder);
+        this.outlineQueue = session.queue;
+        this.outlinePosition = session.position;
         this.outlineHistory = [];
         this.beginOutline(queue[at]);
       }
     }, () => {
     }));
   }
-  beginPassage(p) {
+  beginPassage(p, reset = false) {
+    if (this.passage && this.session) this.passageDrafts.set(this.passage, { session: this.session, saved: this.passageSaved });
+    this.message = "";
     this.passage = p;
-    this.session = new Session(p.text, p.question);
-    if (p.kind && p.kind !== "selection") this.session.start(p.question);
-    this.passageSaved = false;
+    const cached = reset ? void 0 : this.passageDrafts.get(p);
+    this.session = (cached == null ? void 0 : cached.session) || new Session(p.text, p.question);
+    if (!cached && p.kind && p.kind !== "selection") this.session.start(p.question);
+    this.passageSaved = (cached == null ? void 0 : cached.saved) || false;
     this.screen = "passage";
     this.host.shield(this.session.stage === "recall" && this.visible());
     this.saveLocation("passage", p);
@@ -3333,11 +6268,20 @@ var StudyView = class extends import_obsidian2.ItemView {
     const s = this.session, p = this.passage;
     const nav = root.createDiv({ cls: "pp-practice-nav" });
     nav.createEl("span", { text: this.passageQueue.length ? `\u7B2C ${this.passagePosition + 1} / ${this.passageQueue.length} \u8282` : "\u9009\u6BB5\u7EC3\u4E60" });
-    if (this.passageQueue.length > this.passagePosition + 1) this.button(nav, "\u4E0B\u4E00\u8282", () => {
-      if (this.session !== s) return;
-      this.passagePosition++;
-      this.beginPassage(this.passageQueue[this.passagePosition]);
-    });
+    if (this.passageQueue.length) {
+      const previous = this.button(nav, "\u4E0A\u4E00\u8282", () => {
+        if (this.session !== s || this.passagePosition <= 0) return;
+        this.passagePosition--;
+        this.beginPassage(this.passageQueue[this.passagePosition]);
+      });
+      previous.disabled = this.busy || this.passagePosition === 0;
+      const next = this.button(nav, "\u4E0B\u4E00\u8282", () => {
+        if (this.session !== s || this.passagePosition + 1 >= this.passageQueue.length) return;
+        this.passagePosition++;
+        this.beginPassage(this.passageQueue[this.passagePosition]);
+      });
+      next.disabled = this.busy || this.passagePosition + 1 >= this.passageQueue.length;
+    }
     root.createEl("p", { text: p.path, cls: "pp-source-path" });
     if ((_a2 = p.headingPath) == null ? void 0 : _a2.length) root.createEl("p", { text: p.headingPath.join(" \u203A "), cls: "pp-heading-path" });
     if (p.kind && p.kind !== "selection") root.createEl("p", { text: p.kind === "intro" ? "\u7236\u6807\u9898\u5F15\u8A00 \xB7 \u4EC5\u5B50\u6807\u9898\u524D\u7684\u6B63\u6587" : p.kind === "preamble" ? "\u7B14\u8BB0\u5F15\u8A00 \xB7 \u9996\u4E2A\u6807\u9898\u524D\u7684\u6B63\u6587" : p.kind === "document" ? "\u65E0 Markdown \u6807\u9898 \xB7 \u5168\u6587\u4F5C\u4E3A\u4E00\u4E2A\u7B54\u6848" : "\u6807\u9898\u5C0F\u8282 \xB7 \u542B\u672C\u8282\u5168\u90E8\u6B63\u6587", cls: "pp-footnote" });
@@ -3357,11 +6301,13 @@ var StudyView = class extends import_obsidian2.ItemView {
       root.createEl("p", { text: s.question, cls: "pp-question" });
       this.field(root, "\u6211\u7684\u56DE\u5FC6", s.recall, (v) => s.recall = v, "\u7528\u81EA\u5DF1\u7684\u8BDD\u5199\u4E0B\u8BB0\u5F97\u7684\u5185\u5BB9\u2026\u2026");
       this.button(root, "\u63ED\u6653\u5E76\u5BF9\u7167", () => {
+        if (this.session !== s || s.stage !== "recall") return;
         s.reveal();
         this.host.shield(false);
         this.render();
+        void this.revealSource(p, () => this.screen === "passage" && this.session === s && s.stage === "compare");
       }, true).addClass("pp-wide");
-      root.createEl("p", { text: "\u60F3\u4E0D\u8D77\u6765\u4E5F\u53EF\u4EE5\u63ED\u6653\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5224\u9519\u3002", cls: "pp-footnote" });
+      root.createEl("p", { text: "\u60F3\u4E0D\u8D77\u6765\u4E5F\u53EF\u4EE5\u63ED\u6653\u3002", cls: "pp-footnote" });
     } else {
       root.createEl("p", { text: s.question, cls: "pp-question" });
       mountComparison(root.createDiv(), s.target, s.recall, s.rounds.length ? "\u672C\u8F6E\u6F0F\u70B9\u7B54\u6848" : p.kind && p.kind !== "selection" ? "\u672C\u8282\u5B8C\u6574\u7B54\u6848" : "\u539F\u59CB\u9009\u6BB5", this.compare, (value) => this.compare = value, (parent, text2, onReady) => this.previews.mount(parent, text2, p.path, onReady));
@@ -3383,11 +6329,11 @@ var StudyView = class extends import_obsidian2.ItemView {
         this.message = "\u5DF2\u65B0\u5EFA\u590D\u4E60\u8BB0\u5F55\uFF0C\u539F\u7B14\u8BB0\u672A\u6539\u52A8";
       }));
       save.disabled = this.passageSaved || this.busy;
-      this.button(actions, "\u628A\u6F0F\u70B9\u5236\u6210\u5361\u7247", () => this.openEditor(void 0, false, { front: s.question, back: s.points().join("\n") || s.target, sourcePath: p.path }));
+      this.button(actions, "\u628A\u6F0F\u70B9\u5236\u6210\u5361\u7247", () => this.openEditor(void 0, false, { front: s.question, back: s.points().join("\n") || s.target, sourcePath: p.path, sourceRef: passageSourceRef(p) }));
       this.button(actions, p.kind && p.kind !== "selection" ? "\u91CD\u65B0\u56DE\u5FC6\u672C\u8282" : "\u91CD\u65B0\u7EC3\u4E60\u9009\u6BB5", () => {
-        if (this.session === s) this.beginPassage(p);
+        if (this.session === s) this.beginPassage(p, true);
       });
-      this.button(actions, "\u628A\u672C\u8282\u5236\u6210\u5361\u7247", () => this.openEditor(void 0, false, { front: p.question, back: p.text, sourcePath: p.path }));
+      this.button(actions, "\u628A\u672C\u8282\u5236\u6210\u5361\u7247", () => this.openEditor(void 0, false, { front: p.question, back: p.text, sourcePath: p.path, sourceRef: passageSourceRef(p) }));
     }
   }
   renderOutlineHome(root) {
@@ -3421,8 +6367,9 @@ var StudyView = class extends import_obsidian2.ItemView {
       this.outlinePage = page.page;
       for (const p of page.items) {
         const button = this.button(list, "", () => {
-          this.outlineQueue = filtered;
-          this.outlinePosition = filtered.indexOf(p);
+          const session = sessionFrom(filtered, p, this.reviewOrder);
+          this.outlineQueue = session.queue;
+          this.outlinePosition = session.position;
           this.outlineHistory = [];
           this.beginOutline(p);
         });
@@ -3512,10 +6459,12 @@ var StudyView = class extends import_obsidian2.ItemView {
       this.outlineHistory = [];
       this.beginOutline(this.outlineQueue[this.outlinePosition]);
     });
-    root.createEl("p", { text: complete ? "\u6309\u539F\u6709\u987A\u5E8F\u6838\u5BF9\u5206\u652F\uFF0C\u4E0D\u81EA\u52A8\u5224\u5206\u3002\u8FD4\u56DE\u6216\u9000\u51FA\u4E0D\u4F1A\u4FEE\u6539\u7B14\u8BB0\u3002" : "\u672A\u63ED\u6653\u7684\u8282\u70B9\u548C\u539F\u7B14\u8BB0\u5DF2\u906E\u4F4F\uFF1B\u53EA\u6709\u70B9\u51FB\u63ED\u6653\u624D\u663E\u793A\u5173\u952E\u8BCD\u3002", cls: "pp-footnote" });
+    root.createEl("p", { text: complete ? "\u6838\u5BF9\u540E\u53EF\u7EE7\u7EED\u6DF1\u5165\u4E0B\u4E00\u5C42\u3002" : "\u5148\u56DE\u60F3\uFF0C\u518D\u9010\u9879\u63ED\u6653\u3002", cls: "pp-footnote" });
   }
   startCards(cards) {
-    this.queue = cards;
+    this.againCandidates.clear();
+    this.repeatPass = false;
+    this.queue = sessionOrder(cards, this.reviewOrder);
     this.reviewed = 0;
     this.sessionTotal = cards.length;
     this.undo = void 0;
@@ -3523,6 +6472,15 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.advance();
   }
   advance() {
+    if (!this.queue.length && this.retryAgain && !this.repeatPass) {
+      this.repeatPass = true;
+      const now = Date.now();
+      this.queue = [...this.againCandidates].map((id) => {
+        var _a2;
+        return (_a2 = this.host.store) == null ? void 0 : _a2.get(id);
+      }).filter((c) => !!c && !c.suspended && c.dueAt <= now);
+      this.sessionTotal += this.queue.length;
+    }
     this.current = this.queue[0];
     this.revealed = false;
     this.recall = "";
@@ -3531,38 +6489,44 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.focusRecall();
   }
   renderCard(root) {
+    var _a2, _b, _c, _d, _e, _f, _g, _h;
     const c = this.current;
-    root.createEl("p", { text: `\u672C\u8F6E\u5DF2\u5B8C\u6210 ${this.reviewed} / ${this.sessionTotal}`, cls: "pp-progress" });
+    root.createEl("p", { text: `\u672C\u8F6E\u5DF2\u5B8C\u6210 ${this.reviewed} / ${this.sessionTotal}${this.repeatPass ? " \xB7 \u518D\u7EC3\u6700\u591A\u4E00\u6B21" : ""}`, cls: "pp-progress" });
     if (!c) {
       root.createEl("h2", { text: "\u8FD9\u4E00\u8F6E\uFF0C\u5B8C\u6210\u4E86", cls: "pp-stage-title" });
-      root.createEl("p", { text: `\u5DF2\u5B89\u6392 ${this.reviewed} \u5F20\u5361\u7247\u7684\u4E0B\u6B21\u590D\u4E60\u3002`, cls: "pp-muted" });
+      root.createEl("p", { text: `\u5DF2\u4FDD\u5B58 ${this.reviewed} \u6B21\u8BC4\u5206\uFF0C\u4E0B\u6B21\u590D\u4E60\u5DF2\u5B89\u6392\u3002`, cls: "pp-muted" });
       const upcoming = this.cards().cards.filter((c2) => !c2.suspended).sort((a, b) => a.dueAt - b.dueAt)[0];
       if (upcoming) root.createEl("p", { text: upcoming.dueAt <= Date.now() ? "\u8FD8\u6709\u5361\u7247\u5230\u671F\uFF0C\u53EF\u8FD4\u56DE\u5F00\u59CB\u65B0\u4E00\u8F6E" : `\u4E0B\u6B21\u5230\u671F ${date(upcoming.dueAt)}`, cls: "pp-footnote" });
       this.undoButton(root);
       this.button(root, "\u8FD4\u56DE\u5B66\u4E60\u8303\u56F4", () => this.home(), true);
       return;
     }
+    if (((_b = (_a2 = this.host.store) == null ? void 0 : _a2.schedulingAlgorithm) != null ? _b : "fsrs") === "sm2-osr") root.createEl("p", { text: "\u6309\u5929\u590D\u4E60 \xB7 \u5FD8\u4E86\u4F1A\u5728\u4ECA\u5929\u5230\u671F\uFF0C\u672C\u8F6E\u7ED3\u675F\u540E\u53EF\u518D\u7EC3", cls: "pp-footnote" });
+    if (activeAlgorithm(c) !== ((_d = (_c = this.host.store) == null ? void 0 : _c.schedulingAlgorithm) != null ? _d : "fsrs")) root.createEl("p", { text: "\u672C\u6B21\u8BC4\u5206\u5C06\u521D\u59CB\u5316\u6240\u9009\u7B97\u6CD5\uFF0C\u4E4B\u524D\u7684\u590D\u4E60\u5386\u53F2\u4FDD\u7559", cls: "pp-footnote" });
     root.createEl("p", { text: c.sourcePath || "\u672C\u5730\u5FEB\u7167 \xB7 \u65E0\u6765\u6E90\u7B14\u8BB0", cls: "pp-source-path" });
+    if (c.id.startsWith("note:") && !this.notes.some((n) => n.cards.some((x) => x.id === c.id))) root.createEl("p", { text: "\u6765\u6E90\u6807\u8BB0\u7F3A\u5931\uFF1A\u672C\u6B21\u4F7F\u7528\u5DF2\u4FDD\u5B58\u7684\u6700\u540E\u5FEB\u7167\uFF0C\u8BC4\u5206\u7EE7\u7EED\u72EC\u7ACB\u4FDD\u5B58\u3002", cls: "pp-footnote" });
     const front = root.createDiv({ cls: "pp-front" });
     front.createEl("span", { text: "\u6B63\u9762 \xB7 \u95EE\u9898", cls: "pp-face-label" });
     this.previews.mount(front, c.front, c.sourcePath);
     if (!this.revealed) {
       this.field(root, "\u6211\u7684\u56DE\u5FC6\uFF08\u53EF\u9009\uFF09", this.recall, (v) => this.recall = v, "\u53EF\u4EE5\u9ED8\u60F3\uFF0C\u4E5F\u53EF\u4EE5\u5199\u4E0B\u6765\u2026\u2026");
       this.button(root, "\u7FFB\u5230\u80CC\u9762 \xB7 \u63ED\u6653\u7B54\u6848", () => {
+        if (this.current !== c || this.revealed) return;
         this.revealed = true;
         this.host.shield(false);
         this.render();
+        if (c.sourcePath) void this.revealSource(c, () => this.screen === "card" && this.current === c && this.revealed);
       }, true).addClass("pp-wide");
       this.undoButton(root);
-      root.createEl("p", { text: "\u7B54\u6848\u6682\u4E0D\u663E\u793A\uFF1B\u7B14\u8BB0\u5185\u5BB9\u4E5F\u5DF2\u906E\u4F4F\u3002\u9000\u51FA\u4E0D\u4F1A\u8BB0\u5F55\u8BC4\u5206\u3002", cls: "pp-footnote" });
+      root.createEl("p", { text: "\u9000\u51FA\u4E0D\u4F1A\u8BB0\u5F55\u8BC4\u5206\u3002", cls: "pp-footnote" });
     } else {
       const back = root.createDiv({ cls: "pp-flash-answer" });
       back.createEl("h2", { text: "\u80CC\u9762 \xB7 \u7B54\u6848" });
       this.previews.mount(back, c.back, c.sourcePath);
       if (this.recall) {
-        const own = root.createDiv({ cls: "pp-own-recall" });
-        own.createEl("h2", { text: "\u6211\u7684\u56DE\u5FC6" });
-        this.previews.mount(own, this.recall, c.sourcePath);
+        const own2 = root.createDiv({ cls: "pp-own-recall" });
+        own2.createEl("h2", { text: "\u6211\u7684\u56DE\u5FC6" });
+        this.previews.mount(own2, this.recall, c.sourcePath);
       }
       const corrections = root.createDiv({ cls: "pp-actions" });
       if (!c.id.startsWith("note:")) this.button(corrections, "\u5C31\u5730\u4FEE\u6539\u5361\u7247", () => this.openEditor(c));
@@ -3575,20 +6539,21 @@ var StudyView = class extends import_obsidian2.ItemView {
       }));
       const ratings = root.createDiv({ cls: "pp-ratings" }), now = Date.now();
       for (const rating of ["again", "hard", "good", "easy"]) {
-        const next = applyRating(c, rating, now), interval = rating === "again" ? "10 \u5206\u949F" : `${next.intervalDays} \u5929`;
+        const next = applyRating(c, rating, now, (_f = (_e = this.host.store) == null ? void 0 : _e.schedulingAlgorithm) != null ? _f : "fsrs", srHistogram((_h = (_g = this.host.store) == null ? void 0 : _g.cards) != null ? _h : [], now)), interval = next.sr ? next.intervalDays === 0 ? "\u4ECA\u5929" : `${next.intervalDays} \u5929` : intervalLabel(next.dueAt, now);
         const b = this.button(ratings, "", () => void this.rate(c, rating), rating === "good");
-        b.setAttribute("aria-label", `${ratingLabels[rating]} \xB7 ${interval}\u540E`);
+        b.setAttribute("aria-label", `${ratingLabels[rating]} \xB7 ${interval}${next.sr && next.intervalDays === 0 ? "" : "\u540E"}`);
         b.createEl("strong", { text: ratingLabels[rating] });
-        b.createEl("span", { text: `${interval}\u540E` });
+        b.createEl("span", { text: `${interval}${next.sr && next.intervalDays === 0 ? "" : "\u540E"}` });
       }
-      root.createEl("p", { text: "\u9009\u62E9\u540E\u624D\u4FDD\u5B58\u8FDB\u5EA6\u3002\u6309\u771F\u5B9E\u8BB0\u5FC6\u81EA\u8BC4\uFF0C\u4E0D\u81EA\u52A8\u5224\u65AD\u5BF9\u9519\u3002", cls: "pp-footnote" });
+      root.createEl("p", { text: "\u9009\u62E9\u540E\u4FDD\u5B58\u8FDB\u5EA6\u5E76\u7EE7\u7EED\u4E0B\u4E00\u5F20\u3002", cls: "pp-footnote" });
     }
   }
   assertIndexCurrent(indexedFiles, exclusions) {
-    const files = this.app.vault.getMarkdownFiles().filter((f) => !excluded(f.path, exclusions)), set = new Set(files);
+    const files = this.app.vault.getMarkdownFiles().filter((f) => !excluded(f.path, ["Passage Practice", "Passage Practice backups", ...exclusions])), set = new Set(files);
     if (files.length !== indexedFiles.length || indexedFiles.some((x) => !set.has(x.file) || x.file.path !== x.path || x.file.stat.mtime !== x.mtime || x.file.stat.size !== x.size)) throw new Error("\u8BC4\u5206\u63D0\u4EA4\u524D\u7B14\u8BB0\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u65B0\u590D\u4E60");
   }
   async rate(c, rating) {
+    const before = { queue: [...this.queue], reviewed: this.reviewed, total: this.sessionTotal, again: [...this.againCandidates], repeatPass: this.repeatPass };
     await this.run(async () => {
       if (c.id.startsWith("note:")) {
         if (!await this.refresh()) throw new Error("\u5185\u5BB9\u5237\u65B0\u88AB\u4E2D\u65AD\uFF0C\u672C\u6B21\u672A\u8BC4\u5206\uFF0C\u8BF7\u8FD4\u56DE\u540E\u91CD\u65B0\u5F00\u59CB");
@@ -3599,7 +6564,9 @@ var StudyView = class extends import_obsidian2.ItemView {
       }
       return this.host.store.rate(c.id, c.revision, rating);
     }, () => {
-      this.undo = { previous: c, revision: c.revision + 1 };
+      if (rating === "again" && !this.repeatPass) this.againCandidates.add(c.id);
+      else this.againCandidates.delete(c.id);
+      this.undo = { previous: c, revision: c.revision + 1, ...before };
       this.queue.shift();
       this.reviewed++;
       this.advance();
@@ -3609,17 +6576,19 @@ var StudyView = class extends import_obsidian2.ItemView {
     const undo = this.undo;
     if (!undo) return;
     this.button(root, "\u64A4\u9500\u4E0A\u6B21\u8BC4\u5206", () => void this.run(() => this.host.store.restoreRating(undo.previous, undo.revision), () => {
-      this.queue = this.queue.filter((c) => c.id !== undo.previous.id);
       const restored = this.host.store.get(undo.previous.id);
-      this.queue.unshift(restored);
-      this.reviewed = Math.max(0, this.reviewed - 1);
+      this.queue = undo.queue.map((c) => c.id === restored.id ? restored : c);
+      this.reviewed = undo.reviewed;
+      this.sessionTotal = undo.total;
+      this.againCandidates = new Set(undo.again);
+      this.repeatPass = undo.repeatPass;
       this.undo = void 0;
       this.advance();
     }));
   }
   openSeed(seed) {
     if (this.screen !== "home") {
-      new import_obsidian2.Notice("\u8BF7\u5148\u8FD4\u56DE\u5B66\u4E60\uFF0C\u518D\u521B\u5EFA\u65B0\u5361\u7247");
+      new import_obsidian3.Notice("\u8BF7\u5148\u8FD4\u56DE\u5B66\u4E60\uFF0C\u518D\u521B\u5EFA\u65B0\u5361\u7247");
       return;
     }
     this.mode = "cards";
@@ -3627,15 +6596,15 @@ var StudyView = class extends import_obsidian2.ItemView {
   }
   openEditor(card, insert = false, seed) {
     if (!this.host.store) {
-      new import_obsidian2.Notice(this.host.storageError);
+      new import_obsidian3.Notice(this.host.storageError);
       return;
     }
     this.returnScreen = this.screen === "library" ? "library" : this.screen === "card" ? "card" : this.screen === "passage" ? "passage" : "home";
-    this.draft = seed ? { ...seed } : card ? { front: card.front, back: card.back, sourcePath: card.sourcePath } : { front: "", back: "", sourcePath: this.host.currentPath };
+    this.draft = seed ? { ...seed } : card ? { front: card.front, back: card.back, sourcePath: card.sourcePath, sourceRef: card.sourceRef } : { front: "", back: "", sourcePath: "" };
     this.editCard = card;
     this.clozeTerm = "";
     this.relearn = false;
-    this.insert = insert;
+    this.insert = false;
     this.screen = "edit";
     this.render();
   }
@@ -3645,8 +6614,8 @@ var StudyView = class extends import_obsidian2.ItemView {
     this.render();
   }
   renderEditor(root) {
-    root.createEl("h2", { text: this.insert ? "\u63D2\u5165\u5361\u7247\u6807\u8BB0" : this.editCard ? "\u7F16\u8F91\u5FEB\u7167\u5361\u7247" : "\u65B0\u5EFA\u5FEB\u7167\u5361\u7247", cls: "pp-stage-title" });
-    root.createEl("p", { text: this.insert ? "\u5199\u6E05\u695A\u8981\u95EE\u4EC0\u4E48\u3001\u6B63\u786E\u7B54\u6848\u662F\u4EC0\u4E48\u3002\u786E\u8BA4\u540E\u8FFD\u52A0\u5230\u5F53\u524D\u7B14\u8BB0\u672B\u5C3E\uFF0C\u4E0D\u66FF\u6362\u6240\u9009\u6587\u5B57\u3002" : "\u5FEB\u7167\u72EC\u7ACB\u4FDD\u5B58\u5728\u63D2\u4EF6\u4E2D\uFF0C\u540E\u7EED\u4FEE\u6539\u539F\u6587\u4E0D\u4F1A\u540C\u6B65\u5230\u8FD9\u5F20\u5361\u7247\u3002", cls: "pp-muted" });
+    root.createEl("h2", { text: this.editCard ? "\u7F16\u8F91\u5361\u7247" : "\u65B0\u5EFA\u5361\u7247", cls: "pp-stage-title" });
+    root.createEl("p", { text: "\u4FEE\u6539\u539F\u7B14\u8BB0\u540E\uFF0C\u5DF2\u4FDD\u5B58\u7684\u5361\u7247\u7B54\u6848\u4E0D\u4F1A\u81EA\u52A8\u66F4\u65B0\u3002", cls: "pp-muted" });
     this.field(root, "\u6B63\u9762 \xB7 \u95EE\u9898", this.draft.front, (v) => this.draft.front = v, "\u4F8B\u5982\uFF1A\u6808\u7684\u51FA\u5165\u987A\u5E8F\u662F\u4EC0\u4E48\uFF1F", 4e3);
     this.field(root, "\u80CC\u9762 \xB7 \u7B54\u6848", this.draft.back, (v) => this.draft.back = v, "\u4F8B\u5982\uFF1A\u540E\u8FDB\u5148\u51FA\uFF08LIFO\uFF09\u3002");
     root.createEl("p", { text: `\u6765\u6E90\uFF1A${this.draft.sourcePath || "\u65E0\u6765\u6E90\u7B14\u8BB0"}`, cls: "pp-source-path" });
@@ -3680,7 +6649,7 @@ var StudyView = class extends import_obsidian2.ItemView {
       syntax.createEl("pre", { text: "```practice-card\nid: \u81EA\u52A8\u751F\u6210\uFF0C\u65E0\u9700\u624B\u5199\n\u95EE\u9898\uFF1A\n\u8FD9\u91CC\u662F\u6B63\u9762\u7684\u95EE\u9898\n\u7B54\u6848\uFF1A\n\u8FD9\u91CC\u662F\u80CC\u9762\u7684\u7B54\u6848\n```" });
       syntax.createEl("p", { text: "\u4FDD\u7559 id\uFF0C\u95EE\u9898\u4E0E\u7B54\u6848\u53EF\u968F\u65F6\u7F16\u8F91\u3002\u9605\u8BFB\u89C6\u56FE\u4F1A\u663E\u793A\u53CC\u9762\u6807\u7B7E\u3002\u590D\u5236\u5361\u7247\u65F6\u8BF7\u91CD\u65B0\u63D2\u5165\uFF0C\u907F\u514D\u91CD\u590D\u7F16\u53F7\u3002" });
     }
-    this.button(root, this.insert ? "\u786E\u8BA4\u8FFD\u52A0\u5230\u7B14\u8BB0\u672B\u5C3E" : "\u4FDD\u5B58\u5361\u7247", () => {
+    this.button(root, "\u4FDD\u5B58\u5361\u7247", () => {
       const d = { ...this.draft }, c = this.editCard;
       if (!d.front.trim() || !d.back.trim()) {
         this.message = "\u8BF7\u586B\u5199\u95EE\u9898\u548C\u7B54\u6848";
@@ -3689,8 +6658,7 @@ var StudyView = class extends import_obsidian2.ItemView {
       }
       let saved;
       void this.run(async () => {
-        if (this.insert) await this.host.insertCard(d);
-        else saved = c ? await this.host.store.edit(c.id, c.revision, d.front, d.back, Date.now(), this.relearn) : await this.host.store.add(d.front, d.back, d.sourcePath);
+        saved = c ? await this.host.store.edit(c.id, c.revision, d.front, d.back, Date.now(), this.relearn) : await this.host.store.add(d.front, d.back, d.sourcePath, Date.now(), this.selectedDeck || DEFAULT_DECK, d.sourceRef);
       }, () => {
         this.screen = this.returnScreen;
         if (saved) {
@@ -3700,17 +6668,18 @@ var StudyView = class extends import_obsidian2.ItemView {
             this.advance();
           } else if (!c) this.startCards([saved]);
         }
-        this.message = this.insert ? "\u5361\u7247\u6807\u8BB0\u5DF2\u63D2\u5165\uFF1B\u95EE\u9898\u548C\u7B54\u6848\u53EF\u5728\u7B14\u8BB0\u4E2D\u7EE7\u7EED\u7F16\u8F91" : "\u5361\u7247\u5DF2\u4FDD\u5B58";
+        this.message = "\u5361\u7247\u5DF2\u4FDD\u5B58";
         void this.refresh(true);
       });
     }, true).addClass("pp-wide");
   }
   renderLibrary(root) {
-    var _a2;
+    var _a2, _b, _c;
     const pool = this.cards().cards;
     const known = new Set(this.notes.flatMap((n) => n.cards).map((c) => c.id)), orphaned = (((_a2 = this.host.store) == null ? void 0 : _a2.cards) || []).filter((c) => c.id.startsWith("note:") && !known.has(c.id));
     if (orphaned.length) root.createEl("p", { text: `${orphaned.length} \u6761\u6807\u8BB0\u5361\u7247\u8BB0\u5F55\u4E0D\u5728\u5F53\u524D\u7D22\u5F15\uFF0C\u8BC4\u5206\u4ECD\u4FDD\u7559\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u5220\u9664\u3002`, cls: "pp-footnote" });
     root.createEl("h2", { text: "\u8FD9\u4E2A\u8303\u56F4\u7684\u5361\u7247", cls: "pp-stage-title" });
+    this.renderScopeCount(root, pool.length);
     root.createEl("p", { text: "\u6BCF\u6279\u6700\u591A 1,000 \u5F20\u3002\u66F4\u6539\u641C\u7D22\u6216\u7B5B\u9009\u4F1A\u6E05\u7A7A\u9009\u62E9\uFF1B\u7FFB\u9875\u4FDD\u7559\u9009\u62E9\u3002", cls: "pp-footnote" });
     const filters = root.createDiv({ cls: "pp-card-filters" }), search = filters.createEl("input", { cls: "pp-search", attr: { type: "search", "aria-label": "\u641C\u7D22\u5361\u7247", placeholder: "\u641C\u7D22\u95EE\u9898\u3001\u7B54\u6848\u6216\u6765\u6E90" } });
     search.value = this.query;
@@ -3738,6 +6707,33 @@ var StudyView = class extends import_obsidian2.ItemView {
       this.bulkReview = null;
     }
     choose("\u5361\u7247\u6765\u6E90", this.cardSource, [["", "\u5168\u90E8\u6765\u6E90"], ...sources.map((path) => [path || NO_SOURCE, path || "\u65E0\u6765\u6E90\u7B14\u8BB0"])], (v) => this.cardSource = v);
+    const membership = root.createDiv({ cls: "pp-actions" }), target = membership.createEl("select", { attr: { "aria-label": "\u52A0\u5165\u5361\u7EC4" } });
+    for (const deck of ((_b = this.host.store) == null ? void 0 : _b.decks) || []) target.createEl("option", { text: deck.name, attr: { value: deck.id } });
+    this.button(membership, "\u5C06\u6240\u9009\u5361\u7247\u52A0\u5165\u5361\u7EC4", () => {
+      const selected = [...this.selectedCards.values()];
+      if (!selected.length) {
+        this.message = "\u8BF7\u5148\u9009\u62E9\u5361\u7247";
+        this.render();
+        return;
+      }
+      void this.run(() => this.host.store.assignDeck(target.value, selected), () => {
+        this.selectedCards.clear();
+        this.message = "\u5DF2\u4FDD\u5B58\u5361\u7EC4\u5173\u8054";
+      });
+    });
+    const selectedDeck = (_c = this.host.store) == null ? void 0 : _c.decks.find((d) => d.id === this.selectedDeck);
+    if (selectedDeck) this.button(membership, "\u4ECE\u5F53\u524D\u5361\u7EC4\u79FB\u51FA\u6240\u9009\u5361\u7247", () => {
+      const selected = [...this.selectedCards.values()];
+      if (!selected.length) {
+        this.message = "\u8BF7\u5148\u9009\u62E9\u5361\u7247";
+        this.render();
+        return;
+      }
+      void this.run(() => this.host.store.removeFromDeck(selectedDeck.id, selectedDeck.revision, selected), () => {
+        this.selectedCards.clear();
+        this.message = "\u5DF2\u79FB\u51FA\u5F53\u524D\u5361\u7EC4\uFF1B\u5361\u7247\u548C\u8BC4\u5206\u4FDD\u7559\uFF0C\u53EF\u5728\u5168\u90E8\u5361\u7EC4\u4E2D\u91CD\u65B0\u52A0\u5165";
+      });
+    });
     const list = root.createDiv({ cls: "pp-library" });
     const draw = () => {
       list.empty();
@@ -3804,7 +6800,7 @@ var StudyView = class extends import_obsidian2.ItemView {
           if (check.checked) {
             if (this.selectedCards.size >= 1e3) {
               check.checked = false;
-              new import_obsidian2.Notice("\u6BCF\u6279\u6700\u591A 1000 \u5F20");
+              new import_obsidian3.Notice("\u6BCF\u6279\u6700\u591A 1000 \u5F20");
               return;
             }
             this.selectedCards.set(c.id, c);
@@ -3863,7 +6859,7 @@ var StudyView = class extends import_obsidian2.ItemView {
   }
   async checkEvidence(c, el) {
     const file = this.app.vault.getAbstractFileByPath(c.sourcePath);
-    if (!(file instanceof import_obsidian2.TFile)) {
+    if (!(file instanceof import_obsidian3.TFile)) {
       el.textContent = "\u6765\u6E90\u5DF2\u79FB\u52A8\u6216\u4E0D\u5B58\u5728\uFF1B\u5361\u7247\u548C\u5B66\u4E60\u8FDB\u5EA6\u4ECD\u7136\u4FDD\u7559";
       return;
     }
@@ -3874,31 +6870,46 @@ var StudyView = class extends import_obsidian2.ItemView {
       el.textContent = "\u6765\u6E90\u8BFB\u53D6\u5931\u8D25\uFF0C\u5361\u7247\u548C\u8FDB\u5EA6\u672A\u6539\u52A8";
     }
   }
+  async revealSource(source, current) {
+    await this.run(async () => {
+      if (!current()) return;
+      await this.locateSource(source, () => !this.closed && current());
+    }, () => {
+    });
+  }
+  async locateSource(source, current = () => !this.closed) {
+    const path = "sourcePath" in source ? source.sourcePath : source.path, file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian3.TFile)) throw new Error("\u6765\u6E90\u7B14\u8BB0\u5DF2\u79FB\u52A8\u6216\u5220\u9664\uFF0C\u8BF7\u8FD4\u56DE\u5B66\u4E60\u540E\u5237\u65B0\u3002");
+    const mtime = file.stat.mtime, size = file.stat.size, text2 = await this.app.vault.read(file);
+    if (!current()) return;
+    if (this.app.vault.getAbstractFileByPath(path) !== file || file.path !== path || file.stat.mtime !== mtime || file.stat.size !== size) throw new Error("\u6765\u6E90\u6B63\u5728\u53D8\u5316\uFF0C\u8BF7\u7A0D\u540E\u91CD\u65B0\u63ED\u6653\u3002");
+    const line = "sourcePath" in source ? resolveCardSourceLine(text2, source) : resolvePassageSourceLine(text2, source);
+    const leaves = this.app.workspace.getLeavesOfType("markdown").filter((leaf2) => leaf2.view.containerEl.closest(".mod-root"));
+    const leaf = leaves.find((l) => {
+      var _a2;
+      return ((_a2 = l.view.file) == null ? void 0 : _a2.path) === path;
+    }) || leaves.find((l) => {
+      var _a2;
+      return ((_a2 = l.view.file) == null ? void 0 : _a2.path) === this.host.currentPath;
+    }) || leaves[0] || this.app.workspace.getLeaf("tab");
+    if (!current()) return;
+    await leaf.openFile(file, { active: true, eState: { line } });
+    if (current()) leaf.setEphemeralState({ line });
+  }
   async openSource(c) {
-    var _a2, _b, _c, _d;
-    const file = this.app.vault.getAbstractFileByPath(c.sourcePath);
-    if (!(file instanceof import_obsidian2.TFile)) {
-      new import_obsidian2.Notice("\u6765\u6E90\u7B14\u8BB0\u5DF2\u4E0D\u5B58\u5728");
-      return;
+    try {
+      await this.locateSource(c);
+    } catch (e) {
+      new import_obsidian3.Notice(e instanceof Error ? e.message : "\u65E0\u6CD5\u6253\u5F00\u6765\u6E90\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002");
     }
-    let line = (_d = (_c = (_a2 = this.notes.flatMap((n) => n.cards).find((x) => x.id === c.id)) == null ? void 0 : _a2.line) != null ? _c : (_b = c.sourceRef) == null ? void 0 : _b.line) != null ? _d : 0;
-    if (c.sourceRef) {
-      const found = locateEvidence(await this.app.vault.read(file), c.sourceRef.excerpt);
-      if (found.status === "present") line = found.line;
-    }
-    await this.app.workspace.getLeaf(false).openFile(file, { eState: { line } });
   }
 };
 
 // src/card-modal.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 var labels = { again: "\u5FD8\u4E86", hard: "\u56F0\u96BE", good: "\u8BB0\u4F4F\u4E86", easy: "\u8F7B\u677E" };
 var date2 = (n) => new Date(n).toLocaleString("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" });
-function intervalLabel(due, now) {
-  const minutes = Math.round((due - now) / 6e4);
-  return minutes < 60 ? `${minutes} \u5206\u949F` : `${Math.round(minutes / 1440)} \u5929`;
-}
-var CardsModal = class extends import_obsidian3.Modal {
+var CardsModal = class extends import_obsidian4.Modal {
   constructor(app, store, done, seed) {
     super(app);
     this.store = store;
@@ -3912,6 +6923,7 @@ var CardsModal = class extends import_obsidian3.Modal {
     __publicField(this, "revealed", false);
     __publicField(this, "recall", "");
     __publicField(this, "query", "");
+    __publicField(this, "reviewOrder", "sequential");
     __publicField(this, "queue", []);
     __publicField(this, "reviewed", 0);
     __publicField(this, "sessionTotal", 0);
@@ -3921,7 +6933,7 @@ var CardsModal = class extends import_obsidian3.Modal {
     __publicField(this, "returnMode", "home");
     __publicField(this, "undo");
     this.mode = seed ? "edit" : "home";
-    this.draft = seed ? { ...seed } : { front: "", back: "", sourcePath: "" };
+    this.draft = seed ? { ...seed, ...seed.sourceRef ? { sourceRef: structuredClone(seed.sourceRef) } : {} } : { front: "", back: "", sourcePath: "" };
   }
   onOpen() {
     this.containerEl.addClass("pp-screen");
@@ -3931,7 +6943,7 @@ var CardsModal = class extends import_obsidian3.Modal {
   }
   close() {
     if (this.busy) {
-      new import_obsidian3.Notice("\u6B63\u5728\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u5019\uFF1B\u5B8C\u6210\u540E\u53EF\u4EE5\u5173\u95ED\u3002");
+      new import_obsidian4.Notice("\u6B63\u5728\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u5019\uFF1B\u5B8C\u6210\u540E\u53EF\u4EE5\u5173\u95ED\u3002");
       return;
     }
     super.close();
@@ -3975,7 +6987,7 @@ var CardsModal = class extends import_obsidian3.Modal {
       if (!this.closed) success();
     } catch (e) {
       this.message = e instanceof Error ? e.message : "\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u4ED3\u5E93\u5199\u5165\u6743\u9650\u540E\u91CD\u8BD5\u3002";
-      if (this.closed) new import_obsidian3.Notice("\u5361\u7247\u4FDD\u5B58\u5931\u8D25\u3002\u8BF7\u91CD\u65B0\u542F\u7528\u63D2\u4EF6\u5E76\u68C0\u67E5\u5199\u5165\u6743\u9650\u3002", 1e4);
+      if (this.closed) new import_obsidian4.Notice("\u5361\u7247\u4FDD\u5B58\u5931\u8D25\u3002\u8BF7\u91CD\u65B0\u542F\u7528\u63D2\u4EF6\u5E76\u68C0\u67E5\u5199\u5165\u6743\u9650\u3002", 1e4);
     } finally {
       this.busy = false;
       if (!this.closed) this.render();
@@ -4004,7 +7016,7 @@ var CardsModal = class extends import_obsidian3.Modal {
     else if (this.mode === "edit") this.editor(body);
     else this.review(body);
     const bottom = root.createDiv({ cls: "pp-bottom" });
-    bottom.createEl("span", { text: "\u539F\u7B14\u8BB0\u4E0D\u6539\u52A8 \xB7 \u624B\u5DE5\u81EA\u8BC4 \xB7 \u7B80\u5355\u95F4\u9694\u7B97\u6CD5" });
+    bottom.createEl("span", { text: "\u539F\u7B14\u8BB0\u4E0D\u6539\u52A8 \xB7 \u624B\u5DE5\u81EA\u8BC4 \xB7 \u95F4\u9694\u590D\u4E60" });
     this.button(bottom, "\u5173\u95ED\u5361\u7247", () => this.close());
     const heading = body.querySelector("h1");
     if (heading) {
@@ -4023,9 +7035,13 @@ var CardsModal = class extends import_obsidian3.Modal {
       tile.createEl("strong", { text: String(count) });
       tile.createEl("span", { text: label2 });
     }
+    const order = body.createEl("select", { attr: { "aria-label": "\u590D\u4E60\u987A\u5E8F" } });
+    for (const [value, text2] of [["sequential", "\u987A\u5E8F\u590D\u4E60"], ["random", "\u4E71\u5E8F\u590D\u4E60"]]) order.createEl("option", { text: text2, attr: { value } });
+    order.value = this.reviewOrder;
+    order.addEventListener("change", () => this.reviewOrder = order.value);
     const row = body.createDiv({ cls: "pp-actions" });
     if (due.length) this.button(row, `\u5F00\u59CB\u590D\u4E60 ${due.length} \u5F20`, () => {
-      this.queue = due.map((c) => c.id);
+      this.queue = sessionOrder(due, this.reviewOrder).map((c) => c.id);
       this.reviewed = 0;
       this.sessionTotal = due.length;
       this.undo = void 0;
@@ -4068,7 +7084,7 @@ var CardsModal = class extends import_obsidian3.Modal {
         this.render();
         return;
       }
-      void this.run(() => c ? this.store.edit(c.id, c.revision, d.front, d.back) : this.store.add(d.front, d.back, d.sourcePath), () => {
+      void this.run(() => c ? this.store.edit(c.id, c.revision, d.front, d.back) : this.store.add(d.front, d.back, d.sourcePath, Date.now(), void 0, d.sourceRef), () => {
         if (this.seed) {
           this.close();
           return;
@@ -4168,13 +7184,13 @@ ${c.back}`.toLocaleLowerCase().includes(query));
       card.createEl("h2", { text: "\u80CC\u9762 \xB7 \u7B54\u6848" });
       this.previews.mount(card, c.back, c.sourcePath);
       if (this.recall) {
-        const own = body.createDiv({ cls: "pp-own-recall" });
-        own.createEl("h2", { text: "\u6211\u7684\u56DE\u5FC6" });
-        this.previews.mount(own, this.recall, c.sourcePath);
+        const own2 = body.createDiv({ cls: "pp-own-recall" });
+        own2.createEl("h2", { text: "\u6211\u7684\u56DE\u5FC6" });
+        this.previews.mount(own2, this.recall, c.sourcePath);
       }
       const row2 = body.createDiv({ cls: "pp-ratings" }), now = Date.now();
       for (const rating of ["again", "hard", "good", "easy"]) {
-        const next = applyRating(c, rating, now);
+        const next = applyRating(c, rating, now, this.store.schedulingAlgorithm, srHistogram(this.store.cards, now));
         const b = this.button(row2, "", () => {
           void this.run(() => this.store.rate(c.id, c.revision, rating), () => {
             this.undo = { previous: c, revision: c.revision + 1 };
@@ -4183,9 +7199,10 @@ ${c.back}`.toLocaleLowerCase().includes(query));
             this.advance();
           });
         }, rating === "good");
-        b.setAttribute("aria-label", `${labels[rating]} \xB7 ${intervalLabel(next.dueAt, now)}\u540E`);
+        const label2 = next.sr ? next.intervalDays === 0 ? "\u4ECA\u5929" : `${next.intervalDays} \u5929\u540E` : `${intervalLabel(next.dueAt, now)}\u540E`;
+        b.setAttribute("aria-label", `${labels[rating]} \xB7 ${label2}`);
         b.createEl("strong", { text: labels[rating] });
-        b.createEl("span", { text: `${intervalLabel(next.dueAt, now)}\u540E` });
+        b.createEl("span", { text: label2 });
       }
       body.createEl("p", { text: "\u6309\u8BB0\u5FC6\u611F\u53D7\u9009\u62E9\uFF1B\u8FD9\u4E0D\u662F\u6B63\u786E\u6027\u81EA\u52A8\u8BC4\u5206\u3002\u53EA\u6709\u9009\u62E9\u540E\u624D\u4FDD\u5B58\u672C\u6B21\u8FDB\u5EA6\u3002", cls: "pp-footnote" });
     }
@@ -4212,7 +7229,7 @@ ${c.back}`.toLocaleLowerCase().includes(query));
 };
 
 // src/main.ts
-var PracticeModal = class extends import_obsidian4.Modal {
+var PracticeModal = class extends import_obsidian5.Modal {
   constructor(app, source, fallback, sourceFile, sourcePath, done, makeCard) {
     super(app);
     this.sourceFile = sourceFile;
@@ -4313,8 +7330,8 @@ var PracticeModal = class extends import_obsidian4.Modal {
       const save = this.button(row, this.saved ? "\u5DF2\u4FDD\u5B58\u65B0\u590D\u4E60\u7B14\u8BB0" : "\u4FDD\u5B58\u4E3A\u65B0\u590D\u4E60\u7B14\u8BB0", () => void this.save(save));
       save.disabled = this.saving || this.saved;
       if (this.makeCard) this.button(row, "\u5236\u6210\u590D\u4E60\u5361\u7247", () => {
-        var _a2;
-        return this.makeCard({ front: s.question, back: s.target, sourcePath: ((_a2 = this.sourceFile) == null ? void 0 : _a2.path) || this.sourcePath });
+        var _a2, _b;
+        return this.makeCard({ front: s.question, back: s.target, sourcePath: ((_a2 = this.sourceFile) == null ? void 0 : _a2.path) || this.sourcePath, sourceRef: passageSourceRef({ text: s.source, question: s.fallback, path: ((_b = this.sourceFile) == null ? void 0 : _b.path) || this.sourcePath, line: 0, kind: "selection" }) });
       });
       body.createEl("p", { text: "\u4FDD\u5B58\u7B14\u8BB0\u6216\u5361\u7247\u624D\u4F1A\u5199\u5165\uFF1B\u7ED3\u675F\u6216 Esc \u4E0D\u4FDD\u5B58\u4E34\u65F6\u7EC3\u4E60\u3002\u4F7F\u7528\u672C\u6B21\u5F00\u59CB\u65F6\u7684\u5FEB\u7167\u3002", cls: "pp-footnote" });
     }
@@ -4332,16 +7349,16 @@ var PracticeModal = class extends import_obsidian4.Modal {
       const sourcePath = ((_a2 = this.sourceFile) == null ? void 0 : _a2.path) || this.sourcePath;
       const path = await createReview((p, t) => this.app.vault.create(p, t), (p) => !!this.app.vault.getAbstractFileByPath(p), reviewNote(this.session, sourcePath, (/* @__PURE__ */ new Date()).toISOString()));
       this.saved = true;
-      new import_obsidian4.Notice(`\u5DF2\u65B0\u5EFA\uFF1A${path}`);
+      new import_obsidian5.Notice(`\u5DF2\u65B0\u5EFA\uFF1A${path}`);
     } catch (e) {
-      new import_obsidian4.Notice("\u4FDD\u5B58\u5931\u8D25\uFF0C\u7EC3\u4E60\u4ECD\u5728\u3002\u8BF7\u68C0\u67E5\u4ED3\u5E93\u5199\u5165\u6743\u9650\u540E\u91CD\u8BD5\u3002");
+      new import_obsidian5.Notice("\u4FDD\u5B58\u5931\u8D25\uFF0C\u7EC3\u4E60\u4ECD\u5728\u3002\u8BF7\u68C0\u67E5\u4ED3\u5E93\u5199\u5165\u6743\u9650\u540E\u91CD\u8BD5\u3002");
     } finally {
       this.saving = false;
       if (!this.closed) this.render();
     }
   }
 };
-var PassagePractice = class extends import_obsidian4.Plugin {
+var PassagePractice = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
     __publicField(this, "store", null);
@@ -4361,19 +7378,26 @@ var PassagePractice = class extends import_obsidian4.Plugin {
       this.locations = new LocationStore(raw, (value) => this.app.vault.adapter.write(locationPath, JSON.stringify(value, null, 2)));
     } catch (e) {
       this.locationError = "\u4E0A\u6B21\u4F4D\u7F6E\u65E0\u6CD5\u5B89\u5168\u8BFB\u53D6\uFF0C\u4F4D\u7F6E\u4FDD\u5B58\u5DF2\u505C\u7528\uFF1B\u8BF7\u4FDD\u7559\u539F\u6587\u4EF6\u540E\u68C0\u67E5\u3002\u5361\u7247\u4E0E\u4E34\u65F6\u7EC3\u4E60\u4E0D\u53D7\u5F71\u54CD\u3002";
-      new import_obsidian4.Notice(this.locationError, 1e4);
+      new import_obsidian5.Notice(this.locationError, 1e4);
     }
     try {
-      this.store = new CardStore(await this.loadData(), (data) => this.saveData(data));
+      const legacyPath = `${this.manifest.dir}/data.json`, adapter = this.app.vault.adapter;
+      const legacy = await adapter.exists("Passage Practice") ? null : await adapter.exists(legacyPath) ? await adapter.read(legacyPath) : null;
+      const storage = await VaultJsonStorage.open(adapter, legacy, (value) => normalizeStudyData(value));
+      if (storage.readOnly) throw new Error(storage.problem || "\u5B58\u50A8\u53EA\u8BFB");
+      const initial = storage.data || normalizeStudyData(null);
+      if (storage.source !== "vault") await storage.persist(initial);
+      this.store = new CardStore(initial, (data) => storage.persist(data));
     } catch (e) {
-      this.storageError = "\u5361\u7247\u6570\u636E\u65E0\u6CD5\u5B89\u5168\u8BFB\u53D6\uFF0C\u5DF2\u505C\u6B62\u5361\u7247\u5199\u5165\u3002\u8BF7\u5907\u4EFD\u63D2\u4EF6 data.json \u540E\u68C0\u67E5\uFF1B\u6BB5\u843D\u590D\u4E60\u4ECD\u53EF\u4F7F\u7528\u3002";
-      new import_obsidian4.Notice(this.storageError, 1e4);
+      this.storageError = "\u5361\u7247\u5199\u5165\u5DF2\u505C\u7528\uFF1A" + (e instanceof Error ? e.message : String(e)) + "\u3002\u8BF7\u4FDD\u7559 Passage Practice \u76EE\u5F55\u548C\u65E7 data.json \u540E\u68C0\u67E5\uFF1B\u6BB5\u843D\u590D\u4E60\u4ECD\u53EF\u4F7F\u7528\u3002";
+      new import_obsidian5.Notice(this.storageError, 1e4);
     }
+    this.addSettingTab(new PracticeSettingTab(this.app, this));
     this.currentPath = ((_a2 = this.app.workspace.getActiveFile()) == null ? void 0 : _a2.path) || "";
-    this.lastMarkdown = this.app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
+    this.lastMarkdown = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
     this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
       var _a3;
-      if ((leaf == null ? void 0 : leaf.view) instanceof import_obsidian4.MarkdownView) {
+      if ((leaf == null ? void 0 : leaf.view) instanceof import_obsidian5.MarkdownView) {
         this.lastMarkdown = leaf.view;
         this.currentPath = ((_a3 = leaf.view.file) == null ? void 0 : _a3.path) || "";
         this.notify();
@@ -4390,7 +7414,7 @@ var PassagePractice = class extends import_obsidian4.Plugin {
     this.registerEvent(this.app.workspace.on("file-open", (file) => {
       if (file) {
         this.currentPath = file.path;
-        const active = this.app.workspace.getActiveViewOfType(import_obsidian4.MarkdownView);
+        const active = this.app.workspace.getActiveViewOfType(import_obsidian5.MarkdownView);
         if (active) this.lastMarkdown = active;
         this.notify();
       }
@@ -4405,7 +7429,7 @@ var PassagePractice = class extends import_obsidian4.Plugin {
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       var _a3;
       if (this.currentPath === oldPath || this.currentPath.startsWith(oldPath + "/")) this.currentPath = file.path + this.currentPath.slice(oldPath.length);
-      if ((_a3 = this.store) == null ? void 0 : _a3.cards.some((c) => c.sourcePath === oldPath || c.sourcePath.startsWith(oldPath + "/"))) void this.store.relocate(oldPath, file.path).then(() => this.notify()).catch(() => new import_obsidian4.Notice("\u6765\u6E90\u8DEF\u5F84\u66F4\u65B0\u5931\u8D25\uFF0C\u5361\u7247\u8FDB\u5EA6\u4FDD\u7559\uFF1B\u8BF7\u91CD\u65B0\u6253\u5F00\u5B66\u4E60\u4FA7\u680F\u68C0\u67E5"));
+      if ((_a3 = this.store) == null ? void 0 : _a3.cards.some((c) => c.sourcePath === oldPath || c.sourcePath.startsWith(oldPath + "/"))) void this.store.relocate(oldPath, file.path).then(() => this.notify()).catch(() => new import_obsidian5.Notice("\u6765\u6E90\u8DEF\u5F84\u66F4\u65B0\u5931\u8D25\uFF0C\u5361\u7247\u8FDB\u5EA6\u4FDD\u7559\uFF1B\u8BF7\u91CD\u65B0\u6253\u5F00\u5B66\u4E60\u4FA7\u680F\u68C0\u67E5"));
       else this.notify();
     }));
     this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, view) => {
@@ -4423,7 +7447,7 @@ var PassagePractice = class extends import_obsidian4.Plugin {
           const face = box.createDiv();
           face.createEl("span", { text: label2, cls: "pp-face-label" });
           const previews = new MarkdownPreviewScope(this.app);
-          const child = new import_obsidian4.MarkdownRenderChild(face);
+          const child = new import_obsidian5.MarkdownRenderChild(face);
           child.onunload = () => previews.reset();
           ctx.addChild(child);
           previews.mount(face, value, ctx.sourcePath);
@@ -4434,6 +7458,9 @@ var PassagePractice = class extends import_obsidian4.Plugin {
         el.createEl("pre", { text: source });
       }
     });
+  }
+  refreshStudyViews() {
+    this.notify();
   }
   notify() {
     window.clearTimeout(this.refreshTimer);
@@ -4469,39 +7496,35 @@ var PassagePractice = class extends import_obsidian4.Plugin {
     if (((_b = (_a2 = this.lastMarkdown) == null ? void 0 : _a2.file) == null ? void 0 : _b.path) === this.currentPath && this.lastMarkdown.getMode() === "source" && this.app.workspace.getLeavesOfType("markdown").some((l) => l.view === this.lastMarkdown)) return this.lastMarkdown;
     const matches = this.app.workspace.getLeavesOfType("markdown").map((l) => l.view).filter((v) => {
       var _a3;
-      return v instanceof import_obsidian4.MarkdownView && ((_a3 = v.file) == null ? void 0 : _a3.path) === this.currentPath && v.getMode() === "source";
+      return v instanceof import_obsidian5.MarkdownView && ((_a3 = v.file) == null ? void 0 : _a3.path) === this.currentPath && v.getMode() === "source";
     });
     return matches.length === 1 ? matches[0] : null;
   }
   start(editor, file) {
     const text2 = editor.getSelection();
     if (!text2.trim() || editor.listSelections().length !== 1 || text2.length > 5e4) {
-      new import_obsidian4.Notice("\u8BF7\u5148\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
+      new import_obsidian5.Notice("\u8BF7\u5148\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
       return;
     }
     const path = (file == null ? void 0 : file.path) || "", line = editor.getCursor("from").line, question = defaultQuestion(editor.getValue(), line, (file == null ? void 0 : file.basename) || "\u56DE\u5FC6\u8FD9\u6BB5\u5185\u5BB9");
+    const sourceRef = selectionSourceRef(editor.getValue(), text2, path, line);
     this.currentPath = path;
-    void this.openStudy().then((view) => view.startSelection({ text: text2, question, path, line }));
+    void this.openStudy().then((view) => view.startSelection({ text: text2, question, path, line, kind: "selection", sourceRef }));
   }
   cardFromSelection(editor, file) {
     const text2 = editor.getSelection();
     if (!text2.trim() || editor.listSelections().length !== 1 || text2.length > 5e4) {
-      new import_obsidian4.Notice("\u8BF7\u5148\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
+      new import_obsidian5.Notice("\u8BF7\u5148\u9009\u62E9\u4E00\u6BB5\u8FDE\u7EED\u6587\u5B57\uFF0C\u6700\u591A 50,000 \u5B57\u7B26");
       return;
     }
     const sourcePath = (file == null ? void 0 : file.path) || "", front = defaultQuestion(editor.getValue(), editor.getCursor("from").line, (file == null ? void 0 : file.basename) || "\u56DE\u5FC6\u8FD9\u6BB5\u5185\u5BB9");
+    const sourceRef = selectionSourceRef(editor.getValue(), text2, sourcePath, editor.getCursor("from").line);
     this.currentPath = sourcePath;
-    void this.openStudy().then((view) => view.openSeed({ front, back: text2, sourcePath }));
+    void this.openStudy().then((view) => view.openSeed({ front, back: text2, sourcePath, sourceRef }));
   }
   async insertCard(seed) {
-    var _a2;
-    const view = this.activeEditor();
-    if (!view || ((_a2 = view.file) == null ? void 0 : _a2.path) !== seed.sourcePath || this.currentPath !== seed.sourcePath) throw new Error("\u5F53\u524D\u7B14\u8BB0\u5DF2\u5207\u6362\u6216\u4E0D\u53EF\u7F16\u8F91\uFF0C\u8BF7\u8FD4\u56DE\u540E\u91CD\u65B0\u63D2\u5165");
-    const content = view.editor.getValue();
-    assertSafeAppend(content);
-    const markup = cardMarkup(crypto.randomUUID(), seed.front, seed.back);
-    const last = view.editor.lastLine(), cursor = { line: last, ch: view.editor.getLine(last).length };
-    view.editor.replaceRange("\n\n" + markup + "\n", cursor);
+    if (!this.store) throw new Error(this.storageError || "\u5361\u7247\u5B58\u50A8\u4E0D\u53EF\u7528");
+    await this.store.add(seed.front, seed.back, seed.sourcePath, Date.now(), void 0, seed.sourceRef);
     this.notify();
   }
   onunload() {
@@ -4510,3 +7533,11 @@ var PassagePractice = class extends import_obsidian4.Plugin {
     this.app.workspace.detachLeavesOfType(STUDY_VIEW);
   }
 };
+/*! Bundled license information:
+
+ts-fsrs/dist/index.mjs:
+ts-fsrs/dist/index.mjs:
+ts-fsrs/dist/index.mjs:
+ts-fsrs/dist/index.mjs:
+  (* istanbul ignore next -- @preserve *)
+*/
